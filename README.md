@@ -1,4 +1,5 @@
-# Tauri + Vanilla TS + llama.cpp
+# RheoEcho ETET Preview APP
+### Tauri + Vanilla TS + llama.cpp
 
 This application currently does not have the production capacity.
 
