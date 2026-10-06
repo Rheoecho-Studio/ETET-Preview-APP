@@ -1,0 +1,30 @@
+[package]
+name = "etet-preview"
+version = "0.1.0"
+description = "ETET Preview - local GGUF chat, zero persistence"
+authors = ["rheoecho"]
+edition = "2021"
+default-run = "etet-preview"
+
+[lib]
+name = "etet_preview_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+llama-sys = { path = "llama-sys" }
+base64 = "0.22"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+sysinfo = { version = "0.33", default-features = false, features = ["system"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+strip = true

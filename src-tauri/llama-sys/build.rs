@@ -1,0 +1,377 @@
+// Builds the local llama.cpp (read-only: never modifies its sources) plus a
+// small C++ shim over its official common/mtmd layers, and generates Rust FFI
+// bindings for llama.h / gguf.h / mtmd.h.
+//
+// Targets covered:
+//   desktop : Windows (msvc + gnu), macOS, Linux
+//   mobile  : Android (arm64-v8a / armeabi-v7a / x86 / x86_64), iOS (device + simulator)
+//
+// Backend defaults: Windows/Linux -> vulkan (GPU), macOS/iOS device -> metal,
+// Android/iOS simulator -> cpu. Windows needs a Vulkan SDK at build time.
+//
+// Optional environment knobs (every one has a sane default):
+//   LLAMA_GPU_BACKEND   cpu | metal | vulkan | opencl   (default: chosen per platform)
+//   ANDROID_NDK_HOME / ANDROID_NDK_ROOT / ANDROID_NDK / NDK_HOME   (Android only)
+//   ANDROID_PLATFORM    default "android-30" (Android 11 minSdk)     (Android only)
+//   IOS_MIN_VERSION     default "14.0"       (iOS 14 min target)     (iOS only)
+//
+// Build against the newest SDK (Android 17 / iOS 27) while keeping the
+// deployment floor at Android 11 / iOS 14, as required by the app.
+use std::env;
+use std::path::PathBuf;
+
+/// First non-empty value among the candidate env vars.
+fn first_env(names: &[&str]) -> Option<String> {
+    names
+        .iter()
+        .filter_map(|n| env::var_os(n))
+        .map(PathBuf::from)
+        .find(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_string_lossy().to_string())
+}
+
+/// Rust target triple -> Android ABI (the name cmake/gradle expect).
+fn android_abi(target: &str) -> &'static str {
+    if target.starts_with("aarch64") {
+        "arm64-v8a"
+    } else if target.starts_with("armv7") {
+        "armeabi-v7a"
+    } else if target.starts_with("i686") {
+        "x86"
+    } else if target.starts_with("x86_64") {
+        "x86_64"
+    } else {
+        panic!("unsupported Android target: {target}")
+    }
+}
+
+/// Rust target triple -> clang target triple including the API level, e.g.
+/// `aarch64-linux-android28`. NDK clang needs the level on the triple.
+fn android_clang_triple(target: &str, api: &str) -> String {
+    if target.starts_with("armv7") {
+        format!("armv7a-linux-androideabi{api}")
+    } else {
+        format!("{target}{api}")
+    }
+}
+
+/// HOST triple -> NDK prebuilt toolchain directory name.
+fn ndk_host_tag(host: &str) -> String {
+    if host.contains("apple-darwin") {
+        if host.starts_with("aarch64") {
+            "darwin-arm64".to_string()
+        } else {
+            "darwin-x86_64".to_string()
+        }
+    } else if host.contains("windows") {
+        "windows-x86_64".to_string()
+    } else if host.starts_with("aarch64") {
+        "linux-aarch64".to_string()
+    } else {
+        "linux-x86_64".to_string()
+    }
+}
+
+fn ios_arch(target: &str) -> &'static str {
+    if target.starts_with("aarch64") {
+        "arm64"
+    } else {
+        "x86_64"
+    }
+}
+
+fn main() {
+    let target = env::var("TARGET").unwrap();
+    let host = env::var("HOST").unwrap();
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+
+    // ---- target classification ----
+    let is_android = target.contains("android");
+    let is_ios = target.contains("apple-ios");
+    let is_macos = target.contains("apple-darwin");
+    let is_windows = target.contains("windows");
+    let is_msvc = target.contains("msvc");
+    let is_apple = is_macos || is_ios;
+    let is_mobile = is_android || is_ios;
+    let is_ios_sim = is_ios
+        && (target.starts_with("x86_64-")
+            || target.starts_with("i686-")
+            || target.ends_with("-sim"));
+
+    // llama.cpp lives at the project root (sibling of src-tauri).
+    // CI can override with LLAMA_CPP_DIR (its own checkout of the fork).
+    let llama_dir = match env::var_os("LLAMA_CPP_DIR") {
+        Some(dir) => PathBuf::from(dir),
+        None => manifest_dir
+            .join("..")
+            .join("..")
+            .join("llama.cpp")
+            .canonicalize()
+            .expect("llama.cpp not found next to src-tauri; set LLAMA_CPP_DIR"),
+    };
+    println!("cargo:rerun-if-env-changed=LLAMA_CPP_DIR");
+    println!("cargo:rerun-if-env-changed=LLAMA_GPU_BACKEND");
+    println!("cargo:rerun-if-env-changed=ANDROID_PLATFORM");
+    println!("cargo:rerun-if-env-changed=IOS_MIN_VERSION");
+    println!("cargo:rerun-if-env-changed=ANDROID_NDK_HOME");
+    println!(
+        "cargo:rerun-if-changed={}",
+        llama_dir.join("include/llama.h").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir.join("shim/shim.cpp").display()
+    );
+
+    // ---- backend selection ----
+    // Windows and Linux desktop must run on the GPU (Vulkan); CPU-only is only
+    // used where no GPU backend is guaranteed to exist (Android, iOS simulator).
+    let backend = env::var("LLAMA_GPU_BACKEND").unwrap_or_else(|_| {
+        if is_ios {
+            if is_ios_sim {
+                "cpu".to_string() // no Metal in the simulator
+            } else {
+                "metal".to_string()
+            }
+        } else if is_macos {
+            "metal".to_string()
+        } else if is_android {
+            "cpu".to_string()
+        } else {
+            "vulkan".to_string() // Windows + Linux desktop
+        }
+    });
+
+    let mut cfg = cmake::Config::new(&llama_dir);
+    cfg.define("BUILD_SHARED_LIBS", "OFF")
+        .define("LLAMA_BUILD_TESTS", "OFF")
+        .define("LLAMA_BUILD_TOOLS", "OFF")
+        .define("LLAMA_BUILD_EXAMPLES", "OFF")
+        .define("LLAMA_BUILD_SERVER", "OFF")
+        .define("LLAMA_BUILD_APP", "OFF")
+        .define("LLAMA_BUILD_UI", "OFF")
+        .define("LLAMA_BUILD_MTMD", "ON")
+        .define("LLAMA_CURL", "OFF")
+        .define("GGML_LLAMAFILE", "OFF")
+        .define("GGML_OPENMP", "OFF")
+        .define("CMAKE_COMPILE_WARNING_AS_ERROR", "OFF")
+        .profile("Release");
+
+    // Cross-compiling: -march=native cannot work for a foreign CPU.
+    if is_mobile {
+        cfg.define("GGML_NATIVE", "OFF");
+    }
+
+    match backend.as_str() {
+        "metal" => {
+            cfg.define("GGML_METAL", "ON");
+            if is_ios && !is_ios_sim {
+                // iOS apps cannot ship a loose .metallib; embed it in the binary.
+                cfg.define("GGML_METAL_EMBED_LIBRARY", "ON");
+            }
+        }
+        "vulkan" => {
+            cfg.define("GGML_VULKAN", "ON");
+        }
+        "opencl" => {
+            cfg.define("GGML_OPENCL", "ON");
+        }
+        _ => {}
+    }
+
+    // ---- per-platform cross-compile settings ----
+    // Filled in for Android so the shim can be compiled with the same NDK
+    // toolchain (and so the NDK sysroot can be added to the link search path).
+    let mut android: Option<(PathBuf, String)> = None; // (sysroot, clang triple)
+
+    if is_android {
+        let ndk = first_env(&[
+            "ANDROID_NDK_HOME",
+            "ANDROID_NDK_ROOT",
+            "ANDROID_NDK",
+            "NDK_HOME",
+        ])
+        .map(PathBuf::from)
+        .expect("Android build needs ANDROID_NDK_HOME (or ANDROID_NDK_ROOT) pointing at the NDK");
+        // android-30 == Android 11, the app's minimum supported version.
+        let platform = env::var("ANDROID_PLATFORM").unwrap_or_else(|_| "android-30".to_string());
+        let api = platform
+            .strip_prefix("android-")
+            .unwrap_or(&platform)
+            .to_string();
+
+        cfg.define(
+            "CMAKE_TOOLCHAIN_FILE",
+            ndk.join("build/cmake/android.toolchain.cmake"),
+        );
+        cfg.define("ANDROID_ABI", android_abi(&target));
+        cfg.define("ANDROID_PLATFORM", &platform);
+        cfg.define("ANDROID_STL", "c++_shared");
+
+        let prebuilt = ndk
+            .join("toolchains/llvm/prebuilt")
+            .join(ndk_host_tag(&host));
+        if !prebuilt.exists() {
+            panic!(
+                "NDK at {} has no prebuilt toolchain for host {host} (looked in {})",
+                ndk.display(),
+                prebuilt.display()
+            );
+        }
+        let sysroot = prebuilt.join("sysroot");
+        android = Some((sysroot, android_clang_triple(&target, &api)));
+    }
+
+    if is_ios {
+        let min_version = first_env(&["IOS_MIN_VERSION", "IPHONEOS_DEPLOYMENT_TARGET"])
+            .unwrap_or_else(|| "14.0".to_string());
+        let sdk = env::var("SDKROOT").unwrap_or_else(|_| {
+            if is_ios_sim {
+                "iphonesimulator".to_string()
+            } else {
+                "iphoneos".to_string()
+            }
+        });
+
+        cfg.define("CMAKE_SYSTEM_NAME", "iOS");
+        cfg.define("CMAKE_OSX_SYSROOT", sdk);
+        cfg.define("CMAKE_OSX_ARCHITECTURES", ios_arch(&target));
+        cfg.define("CMAKE_OSX_DEPLOYMENT_TARGET", &min_version);
+
+        // cc (the crate compiling shim.cpp) reads this for -miphoneos-version-min.
+        if env::var_os("IPHONEOS_DEPLOYMENT_TARGET").is_none() {
+            env::set_var("IPHONEOS_DEPLOYMENT_TARGET", &min_version);
+        }
+    }
+
+    let dst = cfg.build();
+    let build_dir = dst.join("build");
+
+    // ---- C++ shim over llama.cpp's official common/mtmd layers ----
+    let mut ccfg = cc::Build::new();
+    ccfg.cpp(true)
+        .file(manifest_dir.join("shim/shim.cpp"))
+        .include(llama_dir.join("include"))
+        .include(llama_dir.join("ggml/include"))
+        .include(llama_dir.join("common"))
+        .include(llama_dir.join("vendor"))
+        .include(llama_dir.join("tools/mtmd"))
+        .include(&build_dir)
+        .include(build_dir.join("common"))
+        .std("c++17")
+        .warnings(false);
+
+    if let Some((sysroot, triple)) = &android {
+        let clang = sysroot
+            .parent() // .../toolchains/llvm/prebuilt/<tag>
+            .expect("sysroot has a parent")
+            .join("bin")
+            .join(if is_windows { "clang++.exe" } else { "clang++" });
+        ccfg.compiler(clang);
+        ccfg.flag(&format!("--target={triple}"));
+        ccfg.flag(&format!("--sysroot={}", sysroot.display()));
+    } else if is_apple {
+        ccfg.flag("-std=c++17");
+    }
+    ccfg.compile("shim");
+
+    // ---- link ----
+    let lib_dir = if dst.join("lib64").exists() {
+        dst.join("lib64")
+    } else {
+        dst.join("lib")
+    };
+    println!("cargo:rustc-link-search=native={}", lib_dir.display());
+    println!("cargo:rustc-link-search=native={}", build_dir.display());
+    // vendor libs aren't installed; link straight from the build tree
+    println!(
+        "cargo:rustc-link-search=native={}",
+        build_dir.join("vendor/hash").display()
+    );
+    if let Some((sysroot, triple)) = &android {
+        // NDK's C++ runtime / libm live here and are not on rustc's default path
+        println!(
+            "cargo:rustc-link-search=native={}",
+            sysroot.join("usr/lib").join(triple).display()
+        );
+    }
+
+    // order matters for static archives: consumers before providers
+    let mut libs = vec![
+        "llama-common",
+        "mtmd",
+        "llama",
+        "ggml",
+        "ggml-base",
+        "ggml-cpu",
+        "vendor-hash",
+    ];
+    match backend.as_str() {
+        "metal" => libs.push("ggml-metal"),
+        "vulkan" => libs.push("ggml-vulkan"),
+        "opencl" => libs.push("ggml-opencl"),
+        _ => {}
+    }
+    for lib in libs {
+        println!("cargo:rustc-link-lib=static={lib}");
+    }
+
+    // ---- platform runtime / system libs ----
+    if is_apple {
+        println!("cargo:rustc-link-lib=framework=Foundation");
+        println!("cargo:rustc-link-lib=framework=Metal");
+        println!("cargo:rustc-link-lib=framework=MetalKit");
+        println!("cargo:rustc-link-lib=framework=CoreFoundation");
+        println!("cargo:rustc-link-lib=framework=CoreGraphics");
+        println!("cargo:rustc-link-lib=framework=QuartzCore");
+        println!("cargo:rustc-link-lib=dylib=c++");
+    } else if is_android {
+        // Android has no libstdc++; Rust's Android std uses the shared libc++
+        // from the NDK, so link the same one to avoid mixing two runtimes.
+        println!("cargo:rustc-link-lib=c++_shared");
+    } else if !is_windows || !is_msvc {
+        // Linux and MinGW pull in the C++ runtime explicitly; MSVC does it itself.
+        println!("cargo:rustc-link-lib=dylib=stdc++");
+    }
+
+    if backend == "vulkan" && !is_apple {
+        // ggml-vulkan links the Vulkan loader dynamically at runtime.
+        // Windows imports from vulkan-1.dll/.lib, everything else uses -lvulkan.
+        if is_windows {
+            println!("cargo:rustc-link-lib=vulkan-1");
+        } else {
+            println!("cargo:rustc-link-lib=dylib=vulkan");
+        }
+    }
+
+    // ---- bindgen for the raw C APIs still used directly (gguf probe) ----
+    // Cross builds parse the headers with the host clang; llama.h only needs
+    // plain libc types and every supported target is LP64, so the layout matches.
+    // If a toolchain ever disagrees, override per target with
+    // BINDGEN_EXTRA_CLANG_ARGS_<TARGET> (clang-sys picks it up automatically).
+    let bindings = bindgen::Builder::default()
+        .header("wrapper.h")
+        .clang_arg(format!("-I{}", llama_dir.join("include").display()))
+        .clang_arg(format!("-I{}", llama_dir.join("ggml/include").display()))
+        .clang_arg(format!("-I{}", llama_dir.join("tools/mtmd").display()))
+        .allowlist_function("llama_.*")
+        .allowlist_function("mtmd_.*")
+        .allowlist_function("gguf_.*")
+        .allowlist_type("llama_.*")
+        .allowlist_type("mtmd_.*")
+        .allowlist_type("gguf_.*")
+        .allowlist_var("llama_.*")
+        .allowlist_var("mtmd_.*")
+        .allowlist_var("GGUF_.*")
+        .default_enum_style(bindgen::EnumVariation::Rust {
+            non_exhaustive: false,
+        })
+        .generate_comments(false)
+        .generate()
+        .expect("bindgen failed to generate llama.cpp bindings");
+
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    bindings
+        .write_to_file(out_dir.join("bindings.rs"))
+        .expect("failed to write bindings.rs");
+}

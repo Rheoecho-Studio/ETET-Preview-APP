@@ -1,0 +1,11 @@
+[package]
+name = "llama-sys"
+version = "0.1.0"
+edition = "2021"
+links = "llama"
+build = "build.rs"
+
+[build-dependencies]
+bindgen = "0.72"
+cmake = "0.1"
+cc = "1"

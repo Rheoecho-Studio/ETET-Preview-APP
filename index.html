@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>ETET Preview</title>
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+    <!-- ============ Screen 1: pick model ============ -->
+    <section class="screen" id="screen-model">
+        <div class="lang-switch" id="lang-switch">
+            <button type="button" data-lang="zh-CN">简</button>
+            <button type="button" data-lang="zh-TW">繁</button>
+            <button type="button" data-lang="en">EN</button>
+        </div>
+        <div class="setup-hero">
+            <img class="setup-logo" src="assets/etetlogo.png" alt="ETET Preview">
+            <h1 class="setup-title" data-i18n="site.brand"></h1>
+            <p class="setup-sub" data-i18n="setup.subtitle"></p>
+        </div>
+        <div class="setup-card card">
+            <button class="pixel-button setup-pick" id="btn-pick-model" data-i18n="setup.pick"></button>
+            <p class="card-text setup-hint" data-i18n="setup.pickHint"></p>
+            <div class="model-meta" id="model-meta" hidden>
+                <div class="meta-row"><span data-i18n="setup.name"></span><b id="meta-name"></b></div>
+                <div class="meta-row"><span data-i18n="setup.arch"></span><b id="meta-arch"></b></div>
+                <div class="meta-row"><span data-i18n="setup.layers"></span><b id="meta-layers"></b></div>
+                <div class="meta-row"><span data-i18n="setup.ctxTrain"></span><b id="meta-ctx"></b></div>
+                <div class="meta-row"><span data-i18n="setup.size"></span><b id="meta-size"></b></div>
+                <div class="meta-row" id="row-mmproj">
+                    <span data-i18n="setup.mmproj"></span>
+                    <b id="meta-mmproj"></b>
+                </div>
+                <div class="meta-row" id="row-mmproj-list" hidden>
+                    <span></span>
+                    <div class="mmproj-list" id="mmproj-list"></div>
+                </div>
+            </div>
+            <div class="setup-actions">
+                <button class="ghost-button" id="btn-back-model" data-i18n="setup.repick" hidden></button>
+                <button class="pixel-button" id="btn-to-config" data-i18n="setup.next" hidden></button>
+            </div>
+        </div>
+        <p class="setup-foot" data-i18n="setup.foot"></p>
+    </section>
+
+    <!-- ============ Screen 2: configure engine ============ -->
+    <section class="screen" id="screen-config" hidden>
+        <h2 class="screen-title" data-i18n="config.title"></h2>
+        <div class="setup-card card">
+            <div class="cfg-row">
+                <label data-i18n="config.ctx"></label>
+                <div class="ctx-wrap">
+                    <input type="text" class="text-input ctx-input" id="cfg-ctx"
+                           inputmode="numeric" maxlength="4" value="4">
+                    <span class="ctx-unit">K</span>
+                </div>
+            </div>
+            <p class="card-text ctx-hint" id="cfg-ctx-hint"></p>
+
+            <!-- discrete GPU: LM-Studio-style layer split + memory bars -->
+            <div id="cfg-split" hidden>
+                <div class="cfg-row cfg-row-stack">
+                    <label data-i18n="config.ngl"></label>
+                    <div class="cfg-slider">
+                        <input type="range" id="cfg-ngl" min="0" max="24" value="24">
+                        <b id="cfg-ngl-val">24/24</b>
+                    </div>
+                </div>
+                <p class="card-text cfg-note" data-i18n="config.offloadHint"></p>
+                <div class="mem-bar-row">
+                    <span class="mem-label" data-i18n="config.gpuMem"></span>
+                    <div class="mem-bar"><div class="mem-fill gpu" id="bar-gpu"></div></div>
+                    <b class="mem-val" id="bar-gpu-val"></b>
+                </div>
+                <div class="mem-bar-row">
+                    <span class="mem-label" data-i18n="config.ramMem"></span>
+                    <div class="mem-bar"><div class="mem-fill ram" id="bar-ram"></div></div>
+                    <b class="mem-val" id="bar-ram-val"></b>
+                </div>
+            </div>
+
+            <!-- unified memory SoC: single bar, no split -->
+            <div id="cfg-unified" hidden>
+                <p class="card-text cfg-note" data-i18n="config.unifiedNote"></p>
+                <div class="mem-bar-row">
+                    <span class="mem-label" data-i18n="config.unifiedMem"></span>
+                    <div class="mem-bar"><div class="mem-fill unified" id="bar-unified"></div></div>
+                    <b class="mem-val" id="bar-unified-val"></b>
+                </div>
+            </div>
+
+            <div class="cfg-mem">
+                <div class="meta-row"><span data-i18n="config.availRam"></span><b id="cfg-ram"></b></div>
+                <div class="meta-row"><span data-i18n="config.gpu"></span><b id="cfg-gpu"></b></div>
+            </div>
+            <div class="setup-actions">
+                <button class="ghost-button" id="btn-back-config" data-i18n="setup.repick"></button>
+                <button class="pixel-button" id="btn-start-chat" data-i18n="config.start"></button>
+            </div>
+        </div>
+        <p class="setup-foot" id="cfg-status"></p>
+        <div class="load-progress" id="load-progress" hidden>
+            <div class="progress-bar"><div class="progress-fill"></div></div>
+            <p class="card-text" id="load-progress-text"></p>
+        </div>
+    </section>
+
+    <!-- ============ Screen 3: chat ============ -->
+    <section class="screen screen-chat" id="screen-chat" hidden>
+        <div class="chat-toolbar">
+            <button class="ghost-button small-btn" id="btn-switch-model" data-i18n="chat.switchModel"></button>
+            <button class="ghost-button small-btn" id="btn-clear" data-i18n="chat.clearContext"></button>
+            <span class="model-status" id="model-status"></span>
+            <div class="toolbar-right">
+                <button class="ghost-button small-btn" id="btn-export" data-i18n="chat.copyChat"></button>
+            </div>
+        </div>
+
+        <div class="chat-scroll" id="chat-scroll">
+            <div class="chat-empty" id="chat-empty" data-i18n="chat.emptyChat"></div>
+            <div class="message-list" id="message-list"></div>
+        </div>
+
+        <div class="attached-row" id="attached-row"></div>
+
+        <div class="chat-input-bar">
+            <div class="input-wrap">
+                <textarea id="chat-input" class="text-input chat-textarea"
+                          data-i18n-placeholder="chat.inputPlaceholder" rows="1"></textarea>
+            </div>
+            <div class="chat-buttons-row">
+                <button class="attach-btn disabled" id="btn-image" title="Image">
+                    <span data-i18n="chat.image"></span>
+                </button>
+                <button class="attach-btn" id="btn-file" title="File">
+                    <span data-i18n="chat.file"></span>
+                </button>
+                <button class="think-toggle" id="btn-web" title="Web search">
+                    <span data-i18n="chat.web"></span>
+                </button>
+                <div class="btn-spacer"></div>
+                <button class="pixel-button send-btn" id="btn-send" data-i18n="chat.send"></button>
+            </div>
+        </div>
+    </section>
+
+    <!-- BYOK modal -->
+    <div class="popup-modal" id="byok-modal">
+        <div class="popup-content">
+            <span class="popup-close" id="byok-x">&times;</span>
+            <h3 class="popup-title" data-i18n="byok.title"></h3>
+            <p class="card-text" data-i18n="byok.note"></p>
+            <div class="cfg-row">
+                <label data-i18n="byok.provider"></label>
+                <select class="select-input" id="byok-provider">
+                    <!--<option value="tavily">Tavily</option>
+                    <option value="brave">Brave Search</option>-->
+                    <option value="custom" data-i18n="byok.custom"></option>
+                </select>
+            </div>
+            <div class="cfg-row" id="byok-url-row" hidden>
+                <label data-i18n="byok.url"></label>
+                <input type="text" class="text-input" id="byok-url" placeholder="https://…?q={query}">
+            </div>
+            <div class="cfg-row">
+                <label data-i18n="byok.key"></label>
+                <input type="password" class="text-input" id="byok-key">
+            </div>
+            <div class="setup-actions">
+                <button class="ghost-button" id="byok-skip" data-i18n="byok.skip"></button>
+                <button class="pixel-button" id="byok-save" data-i18n="byok.save"></button>
+            </div>
+        </div>
+    </div>
+
+    <script src="js/i18n.js"></script>
+    <script src="js/ui.js"></script>
+    <script src="js/classification.js"></script>
+    <script src="js/chat.js"></script>
+</body>
+</html>
