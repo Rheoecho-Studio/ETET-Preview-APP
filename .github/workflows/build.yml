@@ -22,7 +22,8 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: build-${{ github.ref }}
+  # per-job group: matrix jobs would otherwise cancel each other
+  group: build-${{ github.ref }}-${{ github.job }}-${{ matrix.platform }}
   cancel-in-progress: true
 
 env:
@@ -75,13 +76,15 @@ jobs:
             patchelf xdg-utils libfuse2 \
             libvulkan-dev glslang-tools
 
+      # humbletim/setup-vulkan-sdk still uses actions/cache@v2, which fails the
+      # whole job at "Set up job" time; this one uses actions/cache@v4.
       - name: install Vulkan SDK (Windows)
         if: matrix.platform == 'windows-latest'
-        uses: humbletim/setup-vulkan-sdk@v1.2.0
+        uses: johnnynunez/setup-vulkan-sdk@v1
         with:
           vulkan-query-version: 1.3.283.0
           vulkan-components: Vulkan-Headers, Vulkan-Loader, Glslang
-          vulkan-use-cache: true
+          vulkan-use-cache: false
 
       - name: install LLVM for bindgen (Windows)
         if: matrix.platform == 'windows-latest'
@@ -104,7 +107,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          projectPath: ./src-tauri
+          projectPath: ./
           args: ${{ matrix.args }}
           uploadWorkflowArtifacts: true
           workflowArtifactNamePattern: '[platform]-[arch]-[bundle]'
@@ -182,9 +185,11 @@ jobs:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
           ANDROID_PLATFORM: android-30
         with:
-          projectPath: ./src-tauri
+          projectPath: ./
           mobile: android
-          args: --target aarch64-linux-android
+          # tauri CLI takes the ABI short name here, not the Rust target triple
+          # (valid values: aarch64, armv7, i686, x86_64).
+          args: --target aarch64
           uploadWorkflowArtifacts: true
           workflowArtifactNamePattern: '[platform]-[arch]-[bundle]'
           retryAttempts: 2
@@ -233,9 +238,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IOS_MIN_VERSION: '14.0'
         with:
-          projectPath: ./src-tauri
+          projectPath: ./
           mobile: ios
-          args: --target aarch64-apple-ios-sim
+          # tauri CLI takes the short arch name here, not the Rust target triple
+          # (valid values: aarch64, aarch64-sim, x86_64).
+          args: --target aarch64-sim
           uploadWorkflowArtifacts: true
           workflowArtifactNamePattern: '[platform]-[arch]-[bundle]'
           retryAttempts: 2
