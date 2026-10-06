@@ -145,7 +145,7 @@ fn main() {
     let mut cfg = cmake::Config::new(&llama_dir);
     cfg.define("BUILD_SHARED_LIBS", "OFF")
         .define("LLAMA_BUILD_TESTS", "OFF")
-        .define("LLAMA_BUILD_TOOLS", "OFF")
+        .define("LLAMA_BUILD_TOOLS", "ON")
         .define("LLAMA_BUILD_EXAMPLES", "OFF")
         .define("LLAMA_BUILD_SERVER", "OFF")
         .define("LLAMA_BUILD_APP", "OFF")
