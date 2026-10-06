@@ -21,11 +21,6 @@ on:
   pull_request:
   workflow_dispatch:
 
-concurrency:
-  # per-job group: matrix jobs would otherwise cancel each other
-  group: build-${{ github.ref }}-${{ github.job }}-${{ matrix.platform }}
-  cancel-in-progress: true
-
 env:
   APP_NAME: ETET-Preview
 
@@ -34,6 +29,10 @@ jobs:
   desktop:
     permissions:
       contents: write
+    # job-level: 'matrix' is not available in a workflow-level concurrency group
+    concurrency:
+      group: build-${{ github.ref }}-desktop-${{ matrix.platform }}
+      cancel-in-progress: true
     strategy:
       fail-fast: false
       matrix:
@@ -127,6 +126,9 @@ jobs:
   android:
     permissions:
       contents: write
+    concurrency:
+      group: build-${{ github.ref }}-android
+      cancel-in-progress: true
     runs-on: ubuntu-24.04
     env:
       ANDROID_TARGET: aarch64-linux-android
@@ -206,6 +208,9 @@ jobs:
   ios:
     permissions:
       contents: write
+    concurrency:
+      group: build-${{ github.ref }}-ios
+      cancel-in-progress: true
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
