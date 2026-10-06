@@ -1,0 +1,246 @@
+name: Build ETET-Preview
+
+# Cross-platform build: Windows / macOS (Apple Silicon) / Linux (AppImage) desktop
+# plus Android / iOS mobile.
+#
+# llama.cpp is mounted as a git submodule (.gitmodules ->
+# https://github.com/mirn0410/llama.cpp, master branch). Every job runs
+# `git submodule update --init --recursive --depth 1` so CI does not have to
+# pull the ~450MB full history.
+#
+# The GPU backend is chosen per platform in src-tauri/llama-sys/build.rs:
+#   Windows / Linux -> Vulkan (required, CPU-only builds are broken)
+#   macOS / iOS device -> Metal
+#   Android / iOS simulator -> CPU
+# Override with LLAMA_GPU_BACKEND=cpu|metal|vulkan|opencl if needed.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  APP_NAME: ETET-Preview
+
+jobs:
+  # desktop
+  desktop:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-24.04
+            args: '' # bundle targets in tauri.conf.json are limited to appimage
+          - platform: windows-latest
+            args: '' # msi
+          - platform: macos-latest
+            args: '--target aarch64-apple-darwin' # Apple Silicon only -> dmg
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: checkout llama.cpp submodule (shallow)
+        run: git submodule update --init --recursive --depth 1
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
+
+      - name: install Linux dependencies
+        if: matrix.platform == 'ubuntu-24.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake clang llvm-dev libclang-dev \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
+            patchelf xdg-utils libfuse2 \
+            libvulkan-dev glslang-tools
+
+      - name: install Vulkan SDK (Windows)
+        if: matrix.platform == 'windows-latest'
+        uses: humbletim/setup-vulkan-sdk@v1.2.0
+        with:
+          vulkan-query-version: 1.3.283.0
+          vulkan-components: Vulkan-Headers, Vulkan-Loader, Glslang
+          vulkan-use-cache: true
+
+      - name: install LLVM for bindgen (Windows)
+        if: matrix.platform == 'windows-latest'
+        uses: KyleMayes/install-llvm-action@v1
+        with:
+          version: '17.0.6'
+
+      - name: export LIBCLANG_PATH (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: echo "LIBCLANG_PATH=$env:LLVM_PATH\bin" >> $env:GITHUB_ENV
+
+      - name: install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Pinned to the released action-v1.0.0
+      # (commit 1deb371b0cd8bd54025b384f1cd735e725c4060f) instead of the floating
+      # @v1 tag, so an upstream change cannot silently break CI.
+      - uses: tauri-apps/tauri-action@action-v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: ./src-tauri
+          args: ${{ matrix.args }}
+          uploadWorkflowArtifacts: true
+          workflowArtifactNamePattern: '[platform]-[arch]-[bundle]'
+          retryAttempts: 2
+          # Only create/update a draft release on tag push; normal pushes and PRs
+          # just upload workflow artifacts.
+          tagName: ${{ startsWith(github.ref, 'refs/tags/') && 'ETET-Preview-v__VERSION__' || '' }}
+          releaseName: 'ETET-Preview v__VERSION__'
+          releaseBody: 'Windows (msi), macOS (dmg, Apple Silicon) and Linux (AppImage) builds.'
+          releaseDraft: true
+          prerelease: false
+
+  # android
+  # The repo has no src-tauri/gen/android (mobile template is not initialized),
+  # so it is initialized here. Only aarch64 is built (the mainstream phone ABI);
+  # add more targets to the matrix if needed.
+  android:
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    env:
+      ANDROID_TARGET: aarch64-linux-android
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: checkout llama.cpp submodule (shallow)
+        run: git submodule update --init --recursive --depth 1
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: setup Android NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          add-to-path: false
+
+      - name: install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: init Android project
+        run: pnpm tauri android init
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+
+      # Minimum is Android 11 (API 30), compiled against the newest SDK.
+      # Change the numbers here to retarget.
+      - name: pin Android SDK levels
+        run: |
+          f=src-tauri/gen/android/app/build.gradle.kts
+          if [ -f "$f" ]; then
+            sed -i -E 's/([A-Za-z]*minSdk[A-Za-z]*[ =]+)[0-9]+/\1 30/; s/([A-Za-z]*targetSdk[A-Za-z]*[ =]+)[0-9]+/\1 37/; s/([A-Za-z]*compileSdk[A-Za-z]*[ =]+)[0-9]+/\1 37/' "$f"
+          fi
+
+      - uses: tauri-apps/tauri-action@action-v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          ANDROID_PLATFORM: android-30
+        with:
+          projectPath: ./src-tauri
+          mobile: android
+          args: --target aarch64-linux-android
+          uploadWorkflowArtifacts: true
+          workflowArtifactNamePattern: '[platform]-[arch]-[bundle]'
+          retryAttempts: 2
+          tagName: ${{ startsWith(github.ref, 'refs/tags/') && 'ETET-Preview-v__VERSION__' || '' }}
+          releaseName: 'ETET-Preview v__VERSION__'
+          releaseBody: 'ETET-Preview v__VERSION__ build artifacts.'
+          releaseDraft: true
+          prerelease: false
+
+  # ios
+  # Uses the simulator target (aarch64-apple-ios-sim): no signing certificate
+  # needed, so it runs on CI. For a real-device ipa, switch the target to
+  # aarch64-apple-ios and configure signing secrets.
+  ios:
+    permissions:
+      contents: write
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: checkout llama.cpp submodule (shallow)
+        run: git submodule update --init --recursive --depth 1
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios-sim
+
+      - name: install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: init iOS project
+        run: pnpm tauri ios init
+
+      - uses: tauri-apps/tauri-action@action-v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IOS_MIN_VERSION: '14.0'
+        with:
+          projectPath: ./src-tauri
+          mobile: ios
+          args: --target aarch64-apple-ios-sim
+          uploadWorkflowArtifacts: true
+          workflowArtifactNamePattern: '[platform]-[arch]-[bundle]'
+          retryAttempts: 2
+          tagName: ${{ startsWith(github.ref, 'refs/tags/') && 'ETET-Preview-v__VERSION__' || '' }}
+          releaseName: 'ETET-Preview v__VERSION__'
+          releaseBody: 'ETET-Preview v__VERSION__ build artifacts.'
+          releaseDraft: true
+          prerelease: false
