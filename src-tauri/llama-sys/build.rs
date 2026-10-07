@@ -113,6 +113,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=LLAMA_GPU_BACKEND");
     println!("cargo:rerun-if-env-changed=ANDROID_PLATFORM");
     println!("cargo:rerun-if-env-changed=IOS_MIN_VERSION");
+    println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
     println!("cargo:rerun-if-env-changed=ANDROID_NDK_HOME");
     println!(
         "cargo:rerun-if-changed={}",
@@ -220,6 +221,39 @@ fn main() {
         }
         let sysroot = prebuilt.join("sysroot");
         android = Some((sysroot, android_clang_triple(&target, &api)));
+    }
+
+    // llama.cpp's ggml uses <filesystem>, which Apple's libc++ only exposes
+    // from macOS 10.15 up. Without an explicit floor, cc-rs falls back to the
+    // Xcode SDK's DefaultDeploymentTarget (e.g. 10.13) and the compile dies
+    // with "'path' is unavailable: introduced in macOS 10.15".
+    if is_macos {
+        let min_version =
+            first_env(&["MACOSX_DEPLOYMENT_TARGET"]).unwrap_or_else(|| "11.0".to_string());
+        cfg.define("CMAKE_OSX_DEPLOYMENT_TARGET", &min_version);
+
+        // cmake-rs 会把 cc 推导出来的 base flags 塞进 CMAKE_{C,CXX,ASM}_FLAGS，
+        // 其中带 -mmacosx-version-min=<Xcode SDK 默认>，光靠 MACOSX_DEPLOYMENT_TARGET
+        // 环境变量经常盖不住。一旦我们自己 define 了这几个变量，cmake-rs 就
+        // 不会再追加它那一份，所以这里完全自己给，版本写死在 target triple 里。
+        let arch = if target.starts_with("aarch64") {
+            "arm64"
+        } else {
+            "x86_64"
+        };
+        let common = format!(
+            "-ffunction-sections -fdata-sections -fPIC \
+             --target={}-apple-macosx{} -mmacosx-version-min={} -w",
+            arch, min_version, min_version
+        );
+        cfg.define("CMAKE_C_FLAGS", &common);
+        cfg.define("CMAKE_CXX_FLAGS", &common);
+        cfg.define("CMAKE_ASM_FLAGS", &common);
+
+        // 下面编译 shim.cpp 的 cc::Build 靠这个环境变量拿 -mmacosx-version-min。
+        if env::var_os("MACOSX_DEPLOYMENT_TARGET").is_none() {
+            env::set_var("MACOSX_DEPLOYMENT_TARGET", &min_version);
+        }
     }
 
     if is_ios {
@@ -349,11 +383,22 @@ fn main() {
     // plain libc types and every supported target is LP64, so the layout matches.
     // If a toolchain ever disagrees, override per target with
     // BINDGEN_EXTRA_CLANG_ARGS_<TARGET> (clang-sys picks it up automatically).
-    let bindings = bindgen::Builder::default()
+    // Android 交叉编译时必须显式给 clang 目标 tarball 和 NDK sysroot，
+    // 否则 clang 按宿主机找头文件，会报
+    // "/usr/include/stdint.h:26:10: fatal error: 'bits/libc-header-start.h' file not found"。
+    let mut bindings = bindgen::Builder::default()
         .header("wrapper.h")
         .clang_arg(format!("-I{}", llama_dir.join("include").display()))
         .clang_arg(format!("-I{}", llama_dir.join("ggml/include").display()))
-        .clang_arg(format!("-I{}", llama_dir.join("tools/mtmd").display()))
+        .clang_arg(format!("-I{}", llama_dir.join("tools/mtmd").display()));
+
+    if let Some((sysroot, triple)) = &android {
+        bindings = bindings
+            .clang_arg(format!("--target={triple}"))
+            .clang_arg(format!("--sysroot={}", sysroot.display()));
+    }
+
+    let bindings = bindings
         .allowlist_function("llama_.*")
         .allowlist_function("mtmd_.*")
         .allowlist_function("gguf_.*")

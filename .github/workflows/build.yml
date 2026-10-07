@@ -112,13 +112,15 @@ jobs:
                 -TimeoutSec 120
 
               Write-Host "Installing Vulkan SDK..."
-              # Start-Process has NO -TimeoutSec parameter (that was the CI bug).
-              # Use -PassThru + WaitForExit(<ms>) instead.
-              $process = Start-Process -FilePath $installer -ArgumentList '/S' -PassThru
-              if (-not $process.WaitForExit(300000)) {
+              # 注意：1.2.189.1 之后 LunarG 换成 Qt Installer Framework，
+              # 老的 /S 已经失效（会一直挂着不退出），必须换成下面这组参数。
+              $process = Start-Process -FilePath $installer `
+                -ArgumentList '--accept-licenses', '--default-answer', '--confirm-command', 'install' `
+                -PassThru
+              if (-not $process.WaitForExit(900000)) {
                 Write-Host "Installer timed out, killing it"
                 $process.Kill()
-                throw "Installer timed out after 300s"
+                throw "Installer timed out after 900s"
               }
 
               if ($process.ExitCode -eq 0) {

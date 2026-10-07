@@ -386,20 +386,26 @@ pub struct SysInfo {
 
 #[tauri::command]
 pub fn system_info() -> SysInfo {
-    use sysinfo::System;
-    let mut sys = System::new();
-    sys.refresh_memory();
     let gpu_backend = if cfg!(target_os = "macos") || cfg!(target_os = "ios") {
         "Metal".to_string()
     } else {
         "Vulkan".to_string()
     };
-    SysInfo {
-        total_mem: sys.total_memory(),
-        available_mem: sys.available_memory(),
-        gpu_backend,
+
+    #[cfg(not(target_os = "ios"))]
+    {
+        use sysinfo::System;
+        let mut sys = System::new();
+        sys.refresh_memory();
+        SysInfo { total_mem: sys.total_memory(), available_mem: sys.available_memory(), gpu_backend }
+    }
+    // iOS 上 sysinfo 不可用，内存信息返回 0，前端别显示就行
+    #[cfg(target_os = "ios")]
+    {
+        SysInfo { total_mem: 0, available_mem: 0, gpu_backend }
     }
 }
+
 
 #[allow(dead_code)]
 fn _keep_imports(_: &c_char) {}

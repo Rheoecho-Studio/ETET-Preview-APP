@@ -21,6 +21,10 @@ serde_json = "1"
 llama-sys = { path = "llama-sys" }
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# sysinfo 不支持 iOS（libc 在 iOS target 下没导出 mach_task_self / proc_pidinfo 等），
+# 所以 iOS 上直接不引入，commands.rs 里有对应的 cfg 分支。
+[target.'cfg(not(target_os = "ios"))'.dependencies]
 sysinfo = { version = "0.34", default-features = false, features = ["system"] }
 
 [profile.release]
