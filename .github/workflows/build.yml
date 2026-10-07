@@ -29,7 +29,6 @@ jobs:
   desktop:
     permissions:
       contents: write
-    # job-level: 'matrix' is not available in a workflow-level concurrency group
     concurrency:
       group: build-${{ github.ref }}-desktop-${{ matrix.platform }}
       cancel-in-progress: true
@@ -60,6 +59,9 @@ jobs:
           node-version: lts/*
           cache: pnpm
 
+      - name: install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
       - name: install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -82,7 +84,7 @@ jobs:
       #  - johnnynunez/setup-vulkan-sdk: builds Glslang from source and fails
       #    (ENABLE_OPT requires SPIRV-Tools)
       # llama.cpp needs glslangValidator + vulkan-1.lib at build time.
-      
+
       - name: install Vulkan SDK (Windows)
         if: matrix.platform == 'windows-latest'
         shell: pwsh
@@ -91,7 +93,7 @@ jobs:
           $maxRetries = 3
           $retryCount = 0
           $installed = $false
-          
+
           while ($retryCount -lt $maxRetries -and -not $installed) {
             try {
               Write-Host "Downloading Vulkan SDK (attempt $($retryCount + 1))..."
@@ -99,10 +101,10 @@ jobs:
                 -Uri "https://sdk.lunarg.com/sdk/download/1.4.363.0/windows/vulkansdk-windows-X64-1.4.363.0.exe" `
                 -OutFile $installer `
                 -TimeoutSec 120
-              
+
               Write-Host "Installing Vulkan SDK..."
               $process = Start-Process -FilePath $installer -ArgumentList '/S' -PassThru -Wait -TimeoutSec 300
-              
+
               if ($process.ExitCode -eq 0) {
                 $installed = $true
                 Write-Host "Installation successful"
@@ -113,14 +115,14 @@ jobs:
               Start-Sleep -Seconds 5
             }
           }
-          
+
           if (-not $installed) {
             throw "Failed to install Vulkan SDK after $maxRetries attempts"
           }
-          
+
           $sdk = "C:\VulkanSDK\1.4.363.0"
           Start-Sleep -Seconds 5
-          
+
           if (-not (Test-Path "$sdk\Bin\glslangValidator.exe")) {
             throw "Vulkan SDK install failed: $sdk\Bin\glslangValidator.exe is missing"
           }
@@ -139,9 +141,6 @@ jobs:
         shell: pwsh
         run: echo "LIBCLANG_PATH=$env:LLVM_PATH\bin" >> $env:GITHUB_ENV
 
-      - name: install frontend dependencies
-        run: pnpm install --frozen-lockfile
-
       # Pinned to the released action-v1.0.0
       # (commit 1deb371b0cd8bd54025b384f1cd735e725c4060f) instead of the floating
       # @v1 tag, so an upstream change cannot silently break CI.
@@ -149,13 +148,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          projectPath: ./
+          projectPath: ./src-tauri
           args: ${{ matrix.args }}
           uploadWorkflowArtifacts: true
           workflowArtifactNamePattern: '[platform]-[arch]-[bundle]'
           retryAttempts: 2
-          # Only create/update a draft release on tag push; normal pushes and PRs
-          # just upload workflow artifacts.
           tagName: ${{ startsWith(github.ref, 'refs/tags/') && 'ETET-Preview-v__VERSION__' || '' }}
           releaseName: 'ETET-Preview v__VERSION__'
           releaseBody: 'Windows (msi), macOS (dmg, Apple Silicon) and Linux (AppImage) builds.'
@@ -163,9 +160,6 @@ jobs:
           prerelease: false
 
   # android
-  # The repo has no src-tauri/gen/android (mobile template is not initialized),
-  # so it is initialized here. Only aarch64 is built (the mainstream phone ABI);
-  # add more targets to the matrix if needed.
   android:
     permissions:
       contents: write
@@ -210,16 +204,6 @@ jobs:
       - name: install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: clean Cargo cache for Android build
-        run: cargo clean
-
-      - name: init Android project
-        run: pnpm tauri android init
-        env:
-          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
-
-      # Minimum is Android 11 (API 30), compiled against the newest SDK.
-      # Change the numbers here to retarget.
       - name: pin Android SDK levels
         run: |
           f=src-tauri/gen/android/app/build.gradle.kts
@@ -233,10 +217,8 @@ jobs:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
           ANDROID_PLATFORM: android-30
         with:
-          projectPath: ./
+          projectPath: ./src-tauri
           mobile: android
-          # tauri CLI takes the ABI short name here, not the Rust target triple
-          # (valid values: aarch64, armv7, i686, x86_64).
           args: --target aarch64
           uploadWorkflowArtifacts: true
           workflowArtifactNamePattern: '[platform]-[arch]-[bundle]'
@@ -248,9 +230,6 @@ jobs:
           prerelease: false
 
   # ios
-  # Uses the simulator target (aarch64-apple-ios-sim): no signing certificate
-  # needed, so it runs on CI. For a real-device ipa, switch the target to
-  # aarch64-apple-ios and configure signing secrets.
   ios:
     permissions:
       contents: write
@@ -281,21 +260,13 @@ jobs:
       - name: install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: clean Cargo cache for iOS build
-        run: cargo clean
-
-      - name: init iOS project
-        run: pnpm tauri ios init
-
       - uses: tauri-apps/tauri-action@action-v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IOS_MIN_VERSION: '14.0'
         with:
-          projectPath: ./
+          projectPath: ./src-tauri
           mobile: ios
-          # tauri CLI takes the short arch name here, not the Rust target triple
-          # (valid values: aarch64, aarch64-sim, x86_64).
           args: --target aarch64-sim
           uploadWorkflowArtifacts: true
           workflowArtifactNamePattern: '[platform]-[arch]-[bundle]'
