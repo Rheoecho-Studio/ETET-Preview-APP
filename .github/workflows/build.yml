@@ -88,12 +88,39 @@ jobs:
         shell: pwsh
         run: |
           $installer = "$env:RUNNER_TEMP\VulkanSDK-1.4.363.0.exe"
-          Invoke-WebRequest `
-            -Uri "https://sdk.lunarg.com/sdk/download/1.4.363.0/windows/vulkansdk-windows-X64-1.4.363.0.exe" `
-            -OutFile $installer
-          Start-Process -FilePath $installer -ArgumentList '/S' -Wait
-
+          $maxRetries = 3
+          $retryCount = 0
+          $installed = $false
+          
+          while ($retryCount -lt $maxRetries -and -not $installed) {
+            try {
+              Write-Host "Downloading Vulkan SDK (attempt $($retryCount + 1))..."
+              Invoke-WebRequest `
+                -Uri "https://sdk.lunarg.com/sdk/download/1.4.363.0/windows/vulkansdk-windows-X64-1.4.363.0.exe" `
+                -OutFile $installer `
+                -TimeoutSec 120
+              
+              Write-Host "Installing Vulkan SDK..."
+              $process = Start-Process -FilePath $installer -ArgumentList '/S' -PassThru -Wait -TimeoutSec 300
+              
+              if ($process.ExitCode -eq 0) {
+                $installed = $true
+                Write-Host "Installation successful"
+              }
+            } catch {
+              Write-Host "Error: $_"
+              $retryCount++
+              Start-Sleep -Seconds 5
+            }
+          }
+          
+          if (-not $installed) {
+            throw "Failed to install Vulkan SDK after $maxRetries attempts"
+          }
+          
           $sdk = "C:\VulkanSDK\1.4.363.0"
+          Start-Sleep -Seconds 5
+          
           if (-not (Test-Path "$sdk\Bin\glslangValidator.exe")) {
             throw "Vulkan SDK install failed: $sdk\Bin\glslangValidator.exe is missing"
           }
@@ -183,6 +210,9 @@ jobs:
       - name: install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: clean Cargo cache for Android build
+        run: cargo clean
+
       - name: init Android project
         run: pnpm tauri android init
         env:
@@ -250,6 +280,9 @@ jobs:
 
       - name: install frontend dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: clean Cargo cache for iOS build
+        run: cargo clean
 
       - name: init iOS project
         run: pnpm tauri ios init
