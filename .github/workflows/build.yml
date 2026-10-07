@@ -85,22 +85,22 @@ jobs:
         if: matrix.platform == 'windows-latest'
         shell: pwsh
         run: |
-         $ver = '1.4.331.0'  # Updated from 1.4.328.1
-         $installer = "$env:RUNNER_TEMP\VulkanSDK-$ver-Installer.exe"
-         Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/$ver/windows/VulkanSDK-$ver-Installer.exe" -OutFile $installer
-         Start-Process -FilePath $installer -ArgumentList '/S' -Wait
-         $sdk = "C:\VulkanSDK\$ver"
-         if (-not (Test-Path "$sdk\Bin\glslangValidator.exe")) {
-         throw "Vulkan SDK install failed: $sdk\Bin\glslangValidator.exe is missing"
-         }
-         Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_SDK=$sdk"
-         Add-Content -Path $env:GITHUB_PATH -Value "$sdk\Bin"
-         
+          $ver = '1.4.331.0'
+          $installer = "$env:RUNNER_TEMP\VulkanSDK-$ver-Installer.exe"
+          Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/$ver/windows/VulkanSDK-$ver-Installer.exe" -OutFile $installer
+          Start-Process -FilePath $installer -ArgumentList '/S' -Wait
+          $sdk = "C:\VulkanSDK\$ver"
+          if (-not (Test-Path "$sdk\Bin\glslangValidator.exe")) {
+            throw "Vulkan SDK install failed: $sdk\Bin\glslangValidator.exe is missing"
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_SDK=$sdk"
+          Add-Content -Path $env:GITHUB_PATH -Value "$sdk\Bin"
+
       - name: install LLVM for bindgen (Windows)
-         if: matrix.platform == 'windows-latest'
-         uses: KyleMayes/install-llvm-action@v1
-         with:
-           version: '17.0.6'
+        if: matrix.platform == 'windows-latest'
+        uses: KyleMayes/install-llvm-action@v1
+        with:
+          version: '17.0.6'
 
       - name: export LIBCLANG_PATH (Windows)
         if: matrix.platform == 'windows-latest'
