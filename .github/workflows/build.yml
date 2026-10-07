@@ -48,7 +48,13 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: checkout llama.cpp submodule (shallow)
-        run: git submodule update --init --recursive --depth 1
+        run: |
+          git submodule sync --recursive
+          git submodule update --init --recursive --depth 1
+          # 第一层之后常把嵌套 submodule 跳掉；缺了 vulkan-shaders，Windows 上会报
+          # "No download info given for 'vulkan-shaders-gen'"
+          git -C llama.cpp submodule sync --recursive
+          git -C llama.cpp submodule update --init --recursive
 
       - uses: pnpm/action-setup@v4
         with:
@@ -207,7 +213,13 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: checkout llama.cpp submodule (shallow)
-        run: git submodule update --init --recursive --depth 1
+        run: |
+          git submodule sync --recursive
+          git submodule update --init --recursive --depth 1
+          # 第一层之后常把嵌套 submodule 跳掉；缺了 vulkan-shaders，Windows 上会报
+          # "No download info given for 'vulkan-shaders-gen'"
+          git -C llama.cpp submodule sync --recursive
+          git -C llama.cpp submodule update --init --recursive
 
       - uses: pnpm/action-setup@v4
         with:
@@ -281,7 +293,13 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: checkout llama.cpp submodule (shallow)
-        run: git submodule update --init --recursive --depth 1
+        run: |
+          git submodule sync --recursive
+          git submodule update --init --recursive --depth 1
+          # 第一层之后常把嵌套 submodule 跳掉；缺了 vulkan-shaders，Windows 上会报
+          # "No download info given for 'vulkan-shaders-gen'"
+          git -C llama.cpp submodule sync --recursive
+          git -C llama.cpp submodule update --init --recursive
 
       - uses: pnpm/action-setup@v4
         with:

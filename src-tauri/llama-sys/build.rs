@@ -163,21 +163,18 @@ fn main() {
         cfg.define("GGML_NATIVE", "OFF");
     }
 
-    match backend.as_str() {
-        "metal" => {
-            cfg.define("GGML_METAL", "ON");
-            if is_ios && !is_ios_sim {
-                // iOS apps cannot ship a loose .metallib; embed it in the binary.
-                cfg.define("GGML_METAL_EMBED_LIBRARY", "ON");
-            }
-        }
-        "vulkan" => {
-            cfg.define("GGML_VULKAN", "ON");
-        }
-        "opencl" => {
-            cfg.define("GGML_OPENCL", "ON");
-        }
-        _ => {}
+    // 关键：不能只 define 选中的那一个。ggml-backend-reg.cpp 的注册表是按这些
+    // cmake 开关编译的，只要某个后端没被显式关掉（llama.cpp 自己会按平台默认
+    // 打开），就会编译进 *_reg 的调用，链接时找不到对应的静态库：
+    //   macOS / iOS -> "_ggml_backend_blas_reg"
+    //   iOS 模拟器  -> "_ggml_backend_metal_reg"
+    cfg.define("GGML_BLAS", "OFF");
+    cfg.define("GGML_METAL", if backend == "metal" { "ON" } else { "OFF" });
+    cfg.define("GGML_VULKAN", if backend == "vulkan" { "ON" } else { "OFF" });
+    cfg.define("GGML_OPENCL", if backend == "opencl" { "ON" } else { "OFF" });
+    if backend == "metal" && is_ios && !is_ios_sim {
+        // iOS apps cannot ship a loose .metallib; embed it in the binary.
+        cfg.define("GGML_METAL_EMBED_LIBRARY", "ON");
     }
 
     // ---- per-platform cross-compile settings ----

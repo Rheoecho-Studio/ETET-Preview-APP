@@ -32,3 +32,13 @@ codegen-units = 1
 lto = true
 opt-level = 3
 strip = true
+
+# smoke_test 是本地调试用的 bin，别让它跟着 cargo build 一起编译链接：
+# 它在 macOS 上会因 -nodefaultlibs 缺 clang 的 __isPlatformVersionAtLeast 而失败。
+# 本地要跑：cargo build --features smoke
+[features]
+smoke = []
+
+[[bin]]
+name = "smoke_test"
+required-features = ["smoke"]
