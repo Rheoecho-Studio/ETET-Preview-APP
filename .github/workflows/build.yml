@@ -90,9 +90,9 @@ jobs:
       # DefaultDeploymentTarget (10.13 on this image) and the build dies with
       # "'path' is unavailable: introduced in macOS 10.15".
       # 11.0 = first Apple Silicon macOS, and matches rustc's own default.
-      - name: raise macOS deployment target
-        if: startsWith(matrix.platform, 'macos')
-        run: echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
+      # 部署目标由 src-tauri/llama-sys/build.rs 负责（它会把
+      # CMAKE_{C,CXX,ASM}_FLAGS 整个接管过来）。这里不再 export
+      # MACOSX_DEPLOYMENT_TARGET：macOS runner 镜像自带 10.13，覆盖不掉。
 
       - name: install Vulkan SDK (Windows)
         if: matrix.platform == 'windows-latest'
@@ -150,16 +150,30 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_SDK=$sdk"
           Add-Content -Path $env:GITHUB_PATH -Value "$sdk\Bin"
 
+      # KyleMayes/install-llvm-action@v1 不支持 win32 + LLVM 17.0.6
+      # （报错 Unsupported target!(platform='win32', version='17.0.6')），
+      # 直接装 LLVM 官方安装包，LIBCLANG_PATH 给 bindgen 用。
       - name: install LLVM for bindgen (Windows)
         if: matrix.platform == 'windows-latest'
-        uses: KyleMayes/install-llvm-action@v1
-        with:
-          version: '17.0.6'
-
-      - name: export LIBCLANG_PATH (Windows)
-        if: matrix.platform == 'windows-latest'
         shell: pwsh
-        run: echo "LIBCLANG_PATH=$env:LLVM_PATH\bin" >> $env:GITHUB_ENV
+        run: |
+          $exe = "$env:RUNNER_TEMP\LLVM-17.0.6-win64.exe"
+          Invoke-WebRequest `
+            -Uri "https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/LLVM-17.0.6-win64.exe" `
+            -OutFile $exe -TimeoutSec 600
+
+          $process = Start-Process -FilePath $exe -ArgumentList '/S','/D=C:\LLVM' -PassThru
+          if (-not $process.WaitForExit(600000)) {
+            $process.Kill()
+            throw "LLVM installer timed out"
+          }
+          if ($process.ExitCode -ne 0) { throw "LLVM installer exited with $($process.ExitCode)" }
+          if (-not (Test-Path "C:\LLVM\bin\libclang.dll")) {
+            throw "libclang.dll missing after LLVM install"
+          }
+
+          Add-Content -Path $env:GITHUB_ENV -Value "LIBCLANG_PATH=C:\LLVM\bin"
+          Add-Content -Path $env:GITHUB_PATH -Value "C:\LLVM\bin"
 
       # Pinned to the released action-v1.0.0
       # (commit 1deb371b0cd8bd54025b384f1cd735e725c4060f) instead of the floating

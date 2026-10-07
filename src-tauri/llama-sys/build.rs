@@ -228,8 +228,12 @@ fn main() {
     // Xcode SDK's DefaultDeploymentTarget (e.g. 10.13) and the compile dies
     // with "'path' is unavailable: introduced in macOS 10.15".
     if is_macos {
+        // 注意：这里绝对不能读 MACOSX_DEPLOYMENT_TARGET！
+        // macOS runner 镜像本身就把它设成了 10.13，workflow 里 export 的新值
+        // 在 build script 进程里可能仍是 10.13，会直接把部署目标打回 10.13。
+        // 所以用专用 knob LLAMA_MACOS_MIN_VERSION，默认 11.0（第一个 ARM 版 macOS）。
         let min_version =
-            first_env(&["MACOSX_DEPLOYMENT_TARGET"]).unwrap_or_else(|| "11.0".to_string());
+            first_env(&["LLAMA_MACOS_MIN_VERSION"]).unwrap_or_else(|| "11.0".to_string());
         cfg.define("CMAKE_OSX_DEPLOYMENT_TARGET", &min_version);
 
         // cmake-rs 会把 cc 推导出来的 base flags 塞进 CMAKE_{C,CXX,ASM}_FLAGS，
@@ -250,10 +254,8 @@ fn main() {
         cfg.define("CMAKE_CXX_FLAGS", &common);
         cfg.define("CMAKE_ASM_FLAGS", &common);
 
-        // 下面编译 shim.cpp 的 cc::Build 靠这个环境变量拿 -mmacosx-version-min。
-        if env::var_os("MACOSX_DEPLOYMENT_TARGET").is_none() {
-            env::set_var("MACOSX_DEPLOYMENT_TARGET", &min_version);
-        }
+        // 下面编译 shim.cpp 的 cc::Build 会读它，无条件覆盖成我们要的值。
+        env::set_var("MACOSX_DEPLOYMENT_TARGET", &min_version);
     }
 
     if is_ios {
@@ -358,6 +360,9 @@ fn main() {
         println!("cargo:rustc-link-lib=framework=CoreFoundation");
         println!("cargo:rustc-link-lib=framework=CoreGraphics");
         println!("cargo:rustc-link-lib=framework=QuartzCore");
+        // ggml-cpu 用 -mcpu=applesilicon 走 vDSP 加速 *_vadd/_vsmul/...，
+        // 少了这个会在最终链接阶段报 ld: symbol(s) not found for architecture arm64。
+        println!("cargo:rustc-link-lib=framework=Accelerate");
         println!("cargo:rustc-link-lib=dylib=c++");
     } else if is_android {
         // Android has no libstdc++; Rust's Android std uses the shared libc++
