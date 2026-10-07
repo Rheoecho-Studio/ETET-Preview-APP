@@ -70,10 +70,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential cmake clang llvm-dev libclang-dev \
-            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
-            patchelf xdg-utils libfuse2 \
-            libvulkan-dev glslang-tools glslc
+          build-essential cmake clang llvm-dev libclang-dev \
+          libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
+          patchelf xdg-utils libfuse2 \
+          libvulkan-dev glslang-tools glslc \
+          spirv-headers spirv-tools
 
       # Prebuilt LunarG SDK. Alternatives that did not work:
       #  - humbletim/setup-vulkan-sdk: uses actions/cache@v2 -> whole job fails at
@@ -81,18 +82,22 @@ jobs:
       #  - johnnynunez/setup-vulkan-sdk: builds Glslang from source and fails
       #    (ENABLE_OPT requires SPIRV-Tools)
       # llama.cpp needs glslangValidator + vulkan-1.lib at build time.
+      
       - name: install Vulkan SDK (Windows)
         if: matrix.platform == 'windows-latest'
         shell: pwsh
         run: |
-          $ver = '1.4.331.0'
-          $installer = "$env:RUNNER_TEMP\VulkanSDK-$ver-Installer.exe"
-          Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/$ver/windows/VulkanSDK-$ver-Installer.exe" -OutFile $installer
+          $installer = "$env:RUNNER_TEMP\VulkanSDK-1.4.363.0.exe"
+          Invoke-WebRequest `
+            -Uri "https://sdk.lunarg.com/sdk/download/1.4.363.0/windows/vulkansdk-windows-X64-1.4.363.0.exe" `
+            -OutFile $installer
           Start-Process -FilePath $installer -ArgumentList '/S' -Wait
-          $sdk = "C:\VulkanSDK\$ver"
+
+          $sdk = "C:\VulkanSDK\1.4.363.0"
           if (-not (Test-Path "$sdk\Bin\glslangValidator.exe")) {
             throw "Vulkan SDK install failed: $sdk\Bin\glslangValidator.exe is missing"
           }
+
           Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_SDK=$sdk"
           Add-Content -Path $env:GITHUB_PATH -Value "$sdk\Bin"
 
