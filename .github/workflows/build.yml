@@ -85,6 +85,15 @@ jobs:
       #    (ENABLE_OPT requires SPIRV-Tools)
       # llama.cpp needs glslangValidator + vulkan-1.lib at build time.
 
+      # llama.cpp's ggml uses <filesystem>, which Apple's libc++ only exposes
+      # from macOS 10.15 up. Without this, cc/cmake fall back to the Xcode SDK's
+      # DefaultDeploymentTarget (10.13 on this image) and the build dies with
+      # "'path' is unavailable: introduced in macOS 10.15".
+      # 11.0 = first Apple Silicon macOS, and matches rustc's own default.
+      - name: raise macOS deployment target
+        if: startsWith(matrix.platform, 'macos')
+        run: echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
+
       - name: install Vulkan SDK (Windows)
         if: matrix.platform == 'windows-latest'
         shell: pwsh
@@ -103,11 +112,20 @@ jobs:
                 -TimeoutSec 120
 
               Write-Host "Installing Vulkan SDK..."
-              $process = Start-Process -FilePath $installer -ArgumentList '/S' -PassThru -Wait -TimeoutSec 300
+              # Start-Process has NO -TimeoutSec parameter (that was the CI bug).
+              # Use -PassThru + WaitForExit(<ms>) instead.
+              $process = Start-Process -FilePath $installer -ArgumentList '/S' -PassThru
+              if (-not $process.WaitForExit(300000)) {
+                Write-Host "Installer timed out, killing it"
+                $process.Kill()
+                throw "Installer timed out after 300s"
+              }
 
               if ($process.ExitCode -eq 0) {
                 $installed = $true
                 Write-Host "Installation successful"
+              } else {
+                throw "Installer exited with code $($process.ExitCode)"
               }
             } catch {
               Write-Host "Error: $_"
@@ -204,6 +222,12 @@ jobs:
       - name: install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      # tauri-action does NOT create the Android Studio project, and it is not
+      # committed either -> `tauri android build` aborted with
+      # ".../src-tauri/gen/android doesn't exist. Please run `tauri android init`".
+      - name: generate Android Studio project
+        run: pnpm tauri android init
+
       - name: pin Android SDK levels
         run: |
           f=src-tauri/gen/android/app/build.gradle.kts
@@ -259,6 +283,11 @@ jobs:
 
       - name: install frontend dependencies
         run: pnpm install --frozen-lockfile
+
+      # Same story as Android: the Xcode project under src-tauri/gen/apple is
+      # missing, so `tauri ios build` aborted immediately. Generate it here.
+      - name: generate Xcode project
+        run: pnpm tauri ios init
 
       - uses: tauri-apps/tauri-action@action-v1.0.0
         env:
