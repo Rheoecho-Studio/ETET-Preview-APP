@@ -63,25 +63,10 @@ jobs:
           # as a plain directory.
           git submodule update --init --depth 1
           D=llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders
-          # Diagnostics: how many files actually landed in vulkan-shaders.
-          echo "vulkan-shaders entries before: $(ls -1 "$D" 2>/dev/null | wc -l)"
-          # vulkan-shaders is a plain dir at 34688f3 (llama.cpp has no .gitmodules), but on
-          # Windows `git submodule update` sometimes leaves it empty, making ggml-vulkan fail
-          # with "No download info given for 'vulkan-shaders-gen'". Restore it straight from
-          # the upstream tarball instead of git archive / sparse checkout, whose path handling
-          # and failure modes vary per platform (and can fail silently).
-          if [ ! -f "$D/vulkan-shaders-gen.cpp" ]; then
-            echo "vulkan-shaders missing -> restoring from upstream tarball"
-            T=$(mktemp -d)
-            curl -sL --retry 3 --max-time 300 \
-              "https://codeload.github.com/mirn0410/llama.cpp/tar.gz/34688f3dc1daf4cba0a4a6e97597ee1f88d79487" \
-              -o "$T/ll.tgz"
-            tar xzf "$T/ll.tgz" -C "$T"
-            rm -rf "$D"; mkdir -p "$D"
-            cp -rf "$T"/llama.cpp-*/ggml/src/ggml-vulkan/vulkan-shaders/. "$D/"
-            rm -rf "$T"
-          fi
-          echo "vulkan-shaders entries after: $(ls -1 "$D" 2>/dev/null | wc -l)"
+          # vulkan-shaders is a plain directory in llama.cpp (no nested submodule), so a plain
+          # `git submodule update --init` already populates it - verified at 188 files. Just
+          # report the count so any future regression is visible in the log.
+          echo "vulkan-shaders entries: $(ls -1 "$D" 2>/dev/null | wc -l)"
 
       - uses: pnpm/action-setup@v4
         with:
@@ -210,26 +195,11 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "LIBCLANG_PATH=C:\LLVM\bin"
           Add-Content -Path $env:GITHUB_PATH -Value "C:\LLVM\bin"
 
-      # The Windows image ships CMake 4.4, whose ExternalProject turns SOURCE_DIR into an
-      # extended-length path ("//?/D:/..."). CMake's own file(GLOB) cannot read that form, so
-      # ExternalProject_Add(vulkan-shaders-gen) fails with
-      # "No download info given ... is not an existing non-empty directory" even when the
-      # directory really is populated. Linux builds fine on 3.31, so pin that version here.
-      - name: install CMake 3.31 (Windows)
-        if: matrix.platform == 'windows-latest'
-        shell: pwsh
-        run: |
-          $zip = "$env:RUNNER_TEMP\cmake-3.31.zip"
-          Invoke-WebRequest `
-            -Uri "https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-windows-x86_64.zip" `
-            -OutFile $zip -TimeoutSec 300
-          Expand-Archive -Path $zip -DestinationPath "C:\cmake331" -Force
-          $exe = Get-ChildItem -Path "C:\cmake331" -Recurse -Filter cmake.exe |
-                   Select-Object -First 1
-          if (-not $exe) { throw "cmake.exe not found after extraction" }
-          Add-Content -Path $env:GITHUB_PATH -Value $exe.DirectoryName
-          & $exe.FullName --version
-
+      # NOTE: do NOT downgrade CMake here. The image ships 4.4 and the runner's toolchain is
+      # "Visual Studio 18 2026"; CMake 3.x only knows up to "Visual Studio 17 2022" and dies
+      # with "Could not create named generator Visual Studio 18 2026". The vulkan-shaders
+      # failure that looked like a CMake bug was actually the verbatim \\?\ path coming from
+      # build.rs (see strip_verbatim there).
       # Pinned to the released action-v1.0.0
       # (commit 1deb371b0cd8bd54025b384f1cd735e725c4060f) instead of the floating
       # @v1 tag, so an upstream change cannot silently break CI.
@@ -275,25 +245,10 @@ jobs:
           # as a plain directory.
           git submodule update --init --depth 1
           D=llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders
-          # Diagnostics: how many files actually landed in vulkan-shaders.
-          echo "vulkan-shaders entries before: $(ls -1 "$D" 2>/dev/null | wc -l)"
-          # vulkan-shaders is a plain dir at 34688f3 (llama.cpp has no .gitmodules), but on
-          # Windows `git submodule update` sometimes leaves it empty, making ggml-vulkan fail
-          # with "No download info given for 'vulkan-shaders-gen'". Restore it straight from
-          # the upstream tarball instead of git archive / sparse checkout, whose path handling
-          # and failure modes vary per platform (and can fail silently).
-          if [ ! -f "$D/vulkan-shaders-gen.cpp" ]; then
-            echo "vulkan-shaders missing -> restoring from upstream tarball"
-            T=$(mktemp -d)
-            curl -sL --retry 3 --max-time 300 \
-              "https://codeload.github.com/mirn0410/llama.cpp/tar.gz/34688f3dc1daf4cba0a4a6e97597ee1f88d79487" \
-              -o "$T/ll.tgz"
-            tar xzf "$T/ll.tgz" -C "$T"
-            rm -rf "$D"; mkdir -p "$D"
-            cp -rf "$T"/llama.cpp-*/ggml/src/ggml-vulkan/vulkan-shaders/. "$D/"
-            rm -rf "$T"
-          fi
-          echo "vulkan-shaders entries after: $(ls -1 "$D" 2>/dev/null | wc -l)"
+          # vulkan-shaders is a plain directory in llama.cpp (no nested submodule), so a plain
+          # `git submodule update --init` already populates it - verified at 188 files. Just
+          # report the count so any future regression is visible in the log.
+          echo "vulkan-shaders entries: $(ls -1 "$D" 2>/dev/null | wc -l)"
 
       - uses: pnpm/action-setup@v4
         with:
@@ -334,6 +289,19 @@ jobs:
             build-essential cmake clang llvm-dev libclang-dev \
             libvulkan-dev glslang-tools glslc \
             spirv-headers spirv-tools
+          # ggml-vulkan also includes <vulkan/vulkan.hpp> (the Vulkan-Hpp C++ bindings). The
+          # NDK sysroot only ships the C header vulkan/vulkan.h, so cross-compiling dies with
+          # "'vulkan/vulkan.hpp' file not found". Publish vulkan.hpp in an isolated include
+          # dir holding ONLY that file, so it can never shadow the NDK's own vulkan.h.
+          sudo mkdir -p /opt/vulkanhpp/vulkan
+          if [ -f /usr/include/vulkan/vulkan.hpp ]; then
+            sudo cp /usr/include/vulkan/vulkan.hpp /opt/vulkanhpp/vulkan/
+          else
+            sudo curl -sL --retry 3 -o /opt/vulkanhpp/vulkan/vulkan.hpp \
+              https://raw.githubusercontent.com/KhronosGroup/Vulkan-Hpp/main/vulkan/vulkan.hpp
+          fi
+          ls -l /opt/vulkanhpp/vulkan/vulkan.hpp
+          echo "VULKAN_HPP_INCLUDE=/opt/vulkanhpp" >> $GITHUB_ENV
 
       # tauri-action does NOT create the Android Studio project, and it is not
       # committed either -> `tauri android build` aborted with
@@ -392,25 +360,10 @@ jobs:
           # as a plain directory.
           git submodule update --init --depth 1
           D=llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders
-          # Diagnostics: how many files actually landed in vulkan-shaders.
-          echo "vulkan-shaders entries before: $(ls -1 "$D" 2>/dev/null | wc -l)"
-          # vulkan-shaders is a plain dir at 34688f3 (llama.cpp has no .gitmodules), but on
-          # Windows `git submodule update` sometimes leaves it empty, making ggml-vulkan fail
-          # with "No download info given for 'vulkan-shaders-gen'". Restore it straight from
-          # the upstream tarball instead of git archive / sparse checkout, whose path handling
-          # and failure modes vary per platform (and can fail silently).
-          if [ ! -f "$D/vulkan-shaders-gen.cpp" ]; then
-            echo "vulkan-shaders missing -> restoring from upstream tarball"
-            T=$(mktemp -d)
-            curl -sL --retry 3 --max-time 300 \
-              "https://codeload.github.com/mirn0410/llama.cpp/tar.gz/34688f3dc1daf4cba0a4a6e97597ee1f88d79487" \
-              -o "$T/ll.tgz"
-            tar xzf "$T/ll.tgz" -C "$T"
-            rm -rf "$D"; mkdir -p "$D"
-            cp -rf "$T"/llama.cpp-*/ggml/src/ggml-vulkan/vulkan-shaders/. "$D/"
-            rm -rf "$T"
-          fi
-          echo "vulkan-shaders entries after: $(ls -1 "$D" 2>/dev/null | wc -l)"
+          # vulkan-shaders is a plain directory in llama.cpp (no nested submodule), so a plain
+          # `git submodule update --init` already populates it - verified at 188 files. Just
+          # report the count so any future regression is visible in the log.
+          echo "vulkan-shaders entries: $(ls -1 "$D" 2>/dev/null | wc -l)"
 
       - uses: pnpm/action-setup@v4
         with:
@@ -465,7 +418,12 @@ jobs:
       # Build the device arch (Metal backend) unsigned; the .app is then zipped into an
       # unsigned .ipa below (an IPA is just a Payload/ directory). Users download it and
       # self-sign with their own Apple ID. No dev account, no secrets required.
+      # Xcode compiles and links the device .app fine, but tauri's final `-exportArchive` step
+      # insists on a teamID ("teamID should be non-empty"), which we do not have without a paid
+      # account. The .app is already on disk at that point, so tolerate the export failure and
+      # package the .app ourselves below.
       - uses: tauri-apps/tauri-action@action-v1.0.0
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IOS_MIN_VERSION: '14.0'
@@ -488,12 +446,13 @@ jobs:
       # Manually package the unsigned device .app into an unsigned .ipa (a zip of Payload/<app>.app).
       # Users download it and self-sign with their own Apple ID to install on a device.
       - name: package unsigned device IPA
-        if: success()
+        if: always()
         shell: bash
         run: |
-          APP=$(find src-tauri/target/aarch64-apple-ios/release/bundle/ios -name '*.app' 2>/dev/null | head -n1)
+          # Xcode puts the built .app in DerivedData (.../Build/Products/release-iphoneos/).
+          APP=$(find "$HOME/Library/Developer/Xcode/DerivedData" -maxdepth 6 -path '*release-iphoneos*' -name '*.app' 2>/dev/null | head -n1)
           if [ -z "$APP" ]; then
-            APP=$(find src-tauri/gen/apple/build -name '*.app' -maxdepth 4 2>/dev/null | head -n1)
+            APP=$(find src-tauri/target/aarch64-apple-ios/release/bundle/ios src-tauri/gen/apple/build -name '*.app' 2>/dev/null | head -n1)
           fi
           if [ -z "$APP" ]; then
             echo "::error::no device .app produced by tauri ios build"
@@ -509,7 +468,7 @@ jobs:
           echo "wrote $OUT ($(du -h "$OUT" | cut -f1))"
 
       - uses: actions/upload-artifact@v4
-        if: success()
+        if: always()
         with:
           name: ios-aarch64-device-ipa
           path: ${{ runner.temp }}/ios-unsigned.ipa

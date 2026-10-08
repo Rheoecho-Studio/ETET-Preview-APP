@@ -80,6 +80,21 @@ fn ios_arch(target: &str) -> &'static str {
     }
 }
 
+/// On Windows `Path::canonicalize()` returns a verbatim path (`\\?\D:\...`). CMake cannot
+/// inspect such a path: ExternalProject_Add's own file(GLOB)/IS_DIRECTORY checks see it as
+/// empty, so ggml-vulkan's `vulkan-shaders-gen` target fails with
+/// "No download info given ... is not an existing non-empty directory" even though the
+/// directory is fully populated (verified: 188 files). Drop the verbatim prefix so CMake
+/// receives a normal path. Linux/macOS canonicalize never adds the prefix, which is why
+/// only Windows was affected.
+fn strip_verbatim(p: PathBuf) -> PathBuf {
+    let s = p.to_string_lossy().to_string();
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) => PathBuf::from(rest),
+        None => p,
+    }
+}
+
 fn main() {
     let target = env::var("TARGET").unwrap();
     let host = env::var("HOST").unwrap();
@@ -101,13 +116,15 @@ fn main() {
     // llama.cpp lives at the project root (sibling of src-tauri).
     // CI can override with LLAMA_CPP_DIR (its own checkout of the fork).
     let llama_dir = match env::var_os("LLAMA_CPP_DIR") {
-        Some(dir) => PathBuf::from(dir),
-        None => manifest_dir
-            .join("..")
-            .join("..")
-            .join("llama.cpp")
-            .canonicalize()
-            .expect("llama.cpp not found next to src-tauri; set LLAMA_CPP_DIR"),
+        Some(dir) => strip_verbatim(PathBuf::from(dir)),
+        None => strip_verbatim(
+            manifest_dir
+                .join("..")
+                .join("..")
+                .join("llama.cpp")
+                .canonicalize()
+                .expect("llama.cpp not found next to src-tauri; set LLAMA_CPP_DIR"),
+        ),
     };
     println!("cargo:rerun-if-env-changed=LLAMA_CPP_DIR");
     println!("cargo:rerun-if-env-changed=LLAMA_GPU_BACKEND");
@@ -212,6 +229,12 @@ fn main() {
         cfg.define("ANDROID_ABI", android_abi(&target));
         cfg.define("ANDROID_PLATFORM", &platform);
         cfg.define("ANDROID_STL", "c++_shared");
+        // ggml-vulkan includes <vulkan/vulkan.hpp> (Vulkan-Hpp C++ bindings). The NDK sysroot
+        // only has the C header, so CI stages vulkan.hpp in an isolated dir and exports
+        // VULKAN_HPP_INCLUDE; add it as an include path for the C++ compiler only.
+        if let Some(dir) = first_env(&["VULKAN_HPP_INCLUDE"]) {
+            cfg.cxxflag(format!("-I{dir}"));
+        }
         // ggml-vulkan calls `find_package(SPIRV-Headers CONFIG REQUIRED)`, but never actually
         // uses the package afterwards (no include dirs, no linked target). Under the NDK
         // cross-compile toolchain find_package is restricted to the sysroot and cannot see the
