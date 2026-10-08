@@ -18,7 +18,7 @@
 // Build against the newest SDK (Android 17 / iOS 27) while keeping the
 // deployment floor at Android 11 / iOS 14, as required by the app.
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// First non-empty value among the candidate env vars.
 fn first_env(names: &[&str]) -> Option<String> {
@@ -78,6 +78,12 @@ fn ios_arch(target: &str) -> &'static str {
     } else {
         "x86_64"
     }
+}
+
+/// Does `dir` hold a static archive for `name`? MSVC writes `name.lib`, every other
+/// toolchain writes `libname.a`.
+fn has_static_lib(dir: &Path, name: &str) -> bool {
+    dir.join(format!("{name}.lib")).exists() || dir.join(format!("lib{name}.a")).exists()
 }
 
 /// Short CMake work root used on Windows (see the comment at the call site).
@@ -459,6 +465,22 @@ fn main() {
             build_dir.join("vendor/hash/Release").display()
         );
     }
+    // llama.cpp compiles common/build-info.cpp into its own static library, llama-common-base,
+    // and never installs it - it only ever exists inside the build tree. It owns
+    // llama_build_number() / llama_commit() / llama_compiler() / llama_build_target(), and
+    // llama-common's common.obj references all four. On Windows MSVC that surfaces as
+    //   LNK2019: unresolved external symbol "int __cdecl llama_build_number(void)"  (x4)
+    //   LNK1120: 4 unresolved externals
+    // because nothing on the link line provides them.
+    let common_dir = build_dir.join("common");
+    println!("cargo:rustc-link-search=native={}", common_dir.display());
+    if is_windows && is_msvc {
+        // Same multi-config quirk as vendor-hash above.
+        println!(
+            "cargo:rustc-link-search=native={}",
+            common_dir.join("Release").display()
+        );
+    }
     if let Some((sysroot, triple)) = &android {
         // NDK's C++ runtime / libm live here and are not on rustc's default path
         println!(
@@ -475,8 +497,16 @@ fn main() {
         "ggml",
         "ggml-base",
         "ggml-cpu",
-        "vendor-hash",
     ];
+    // llama-common-base (see the link-search note above) is only linked when CMake actually
+    // produced it. Platforms whose linker never pulls common.obj in resolve fine without it,
+    // and forcing it there would risk a "native static library not found" error instead.
+    if has_static_lib(&common_dir, "llama-common-base")
+        || has_static_lib(&common_dir.join("Release"), "llama-common-base")
+    {
+        libs.push("llama-common-base");
+    }
+    libs.push("vendor-hash");
     match backend.as_str() {
         "metal" => libs.push("ggml-metal"),
         "vulkan" => libs.push("ggml-vulkan"),

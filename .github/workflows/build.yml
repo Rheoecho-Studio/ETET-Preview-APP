@@ -333,8 +333,12 @@ jobs:
           # hides /usr/include, so stage it the same way. Same SDK tag as above so the
           # Vulkan / SPIR-V headers stay in sync.
           sudo mkdir -p /opt/spirvh
+          # NOTE: SPIRV-Headers tags its releases "vulkan-sdk-<ver>.0" while Vulkan-Headers /
+          # Vulkan-Hpp use "v<ver>" - so strip the leading "v" before composing the tag.
+          SPIRV_SNAPSHOT="vulkan-sdk-${VULKAN_SNAPSHOT#v}.0"
+          echo "SPIRV-Headers snapshot: $SPIRV_SNAPSHOT"
           curl -sSL --retry 3 --fail --max-time 300 \
-            "https://codeload.github.com/KhronosGroup/SPIRV-Headers/tar.gz/refs/tags/vulkan-sdk-$VULKAN_SNAPSHOT.0" \
+            "https://codeload.github.com/KhronosGroup/SPIRV-Headers/tar.gz/refs/tags/$SPIRV_SNAPSHOT" \
             | sudo tar -xz -C /opt/spirvh --wildcards --strip-components=2 '*/include/*'
 
           sudo chmod -R a+rX /opt/vkh /opt/vulkanhpp /opt/spirvh
