@@ -80,6 +80,21 @@ fn ios_arch(target: &str) -> &'static str {
     }
 }
 
+/// Short CMake work root used on Windows (see the comment at the call site).
+/// `LLAMA_CMAKE_DIR` overrides it; otherwise it sits under TEMP so it is always
+/// writable and never collides with anything.
+fn windows_cmake_dir() -> PathBuf {
+    match first_env(&["LLAMA_CMAKE_DIR"]) {
+        Some(dir) => strip_verbatim(PathBuf::from(dir)),
+        None => {
+            let base = first_env(&["TEMP", "TMP"])
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(r"C:\Windows\Temp"));
+            strip_verbatim(base.join("llama-cb"))
+        }
+    }
+}
+
 /// On Windows `Path::canonicalize()` returns a verbatim path (`\\?\D:\...`). CMake cannot
 /// inspect such a path: ExternalProject_Add's own file(GLOB)/IS_DIRECTORY checks see it as
 /// empty, so ggml-vulkan's `vulkan-shaders-gen` target fails with
@@ -175,6 +190,23 @@ fn main() {
         .define("CMAKE_COMPILE_WARNING_AS_ERROR", "OFF")
         .profile("Release");
 
+    // Windows: keep CMake's build tree out of the (very long) cargo OUT_DIR.
+    // ggml-vulkan builds its shader generator with CMake's ExternalProject, and that runs a
+    // nested `cmake` configure under
+    //   <build>/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-build/
+    //     CMakeFiles/CMakeScratch/TryCompile-XXXXXX/
+    // With OUT_DIR = D:\a\<repo>\<repo>\src-tauri\target\release\build\llama-sys-<hash>\out
+    // that probe path reaches ~258 characters, right at the Windows MAX_PATH limit, and
+    // cl.exe fails its compiler test with
+    //   "error C1083: Cannot open compiler generated file: ''"
+    // -> "Check for working C compiler ... is broken" -> "No CMAKE_CXX_COMPILER could be found".
+    // A short root puts every generated path far below the limit. cmake-rs derives both the
+    // build dir (<root>/build) and the install prefix (<root>) from this value, so nothing
+    // downstream has to change.
+    if is_windows {
+        cfg.out_dir(windows_cmake_dir());
+    }
+
     // Cross-compiling: -march=native cannot work for a foreign CPU.
     if is_mobile {
         cfg.define("GGML_NATIVE", "OFF");
@@ -229,9 +261,25 @@ fn main() {
         cfg.define("ANDROID_ABI", android_abi(&target));
         cfg.define("ANDROID_PLATFORM", &platform);
         cfg.define("ANDROID_STL", "c++_shared");
-        // ggml-vulkan includes <vulkan/vulkan.hpp> (Vulkan-Hpp C++ bindings). The NDK sysroot
-        // only has the C header, so CI stages vulkan.hpp in an isolated dir and exports
-        // VULKAN_HPP_INCLUDE; add it as an include path for the C++ compiler only.
+        // ggml-vulkan includes <vulkan/vulkan.hpp> (the Vulkan-Hpp C++ bindings), which the
+        // NDK sysroot does not ship (it only has the C header vulkan/vulkan.h). Staging
+        // vulkan.hpp alone is not enough either: it pulls in vulkan_hpp_macros.hpp,
+        // vulkan_enums.hpp, ... So CI stages a matched Vulkan-Headers + Vulkan-Hpp snapshot
+        // and exports VULKAN_HEADERS_INCLUDE / VULKAN_HPP_INCLUDE.
+        //
+        // The two halves must come from the same release. ggml-vulkan-types.h selects the
+        // dispatcher namespace from VK_HEADER_VERSION (>= 301 -> vk::detail::DispatchLoaderDynamic,
+        // below -> vk::DispatchLoaderDynamic), so pairing a new vulkan.hpp with the NDK's older
+        // vulkan.h takes the wrong branch and fails to compile. Using both halves of one
+        // snapshot makes VK_HEADER_VERSION the value we chose (313) rather than whatever the
+        // NDK happens to have.
+        //
+        // The C headers go to both compilers so C and C++ see the same Vulkan version; the C++
+        // bindings are C++-only, so they can never leak into C translation units.
+        if let Some(dir) = first_env(&["VULKAN_HEADERS_INCLUDE"]) {
+            cfg.cflag(format!("-I{dir}"));
+            cfg.cxxflag(format!("-I{dir}"));
+        }
         if let Some(dir) = first_env(&["VULKAN_HPP_INCLUDE"]) {
             cfg.cxxflag(format!("-I{dir}"));
         }

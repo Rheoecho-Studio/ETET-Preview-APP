@@ -15,6 +15,13 @@ name: Build ETET-Preview
 #   iOS device -> Metal, built UNSIGNED (CODE_SIGNING_ALLOWED=NO) so users can
 #                self-sign the .ipa with their own Apple ID — no dev account needed.
 # Override with LLAMA_GPU_BACKEND=cpu|metal|vulkan|opencl if needed.
+#
+# Two host-side prerequisites for the Vulkan backend live outside build.rs:
+#   Android: the NDK has no Vulkan-Hpp, so a version-matched Vulkan-Headers +
+#            Vulkan-Hpp snapshot is staged under /opt (see the android job).
+#   Windows: llama.cpp's nested CMake ExternalProject breaks the 260-char MAX_PATH
+#            limit, so the CMake build tree is moved to a short root (see build.rs)
+#            and long paths are enabled in the registry above.
 
 on:
   push:
@@ -49,24 +56,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # llama.cpp builds ggml-vulkan's shader generator through a nested CMake
+      # ExternalProject, whose MSVC compiler probe writes under
+      #   <build>/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/
+      #     vulkan-shaders-gen-build/CMakeFiles/CMakeScratch/TryCompile-XXXXXX/
+      # Under the default OUT_DIR that path reaches ~258 characters, right at the legacy
+      # 260-char MAX_PATH limit, and cl.exe fails it with
+      #   "error C1083: Cannot open compiler generated file: ''"
+      # -> "Check for working C compiler ... is broken"
+      # -> "No CMAKE_CXX_COMPILER could be found".
+      # Three cheap mitigations, all together:
+      #   1. TEMP -> C:\T (build.rs also derives its short CMake root from TEMP)
+      #   2. lift the MAX_PATH limit in the registry
+      #   3. long paths for git's own checkout
+      # build.rs does the real fix: it moves the whole CMake build tree out of OUT_DIR.
+      - name: shorten temp and enable long paths (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path C:\T | Out-Null
+          Add-Content -Path $env:GITHUB_ENV -Value "TEMP=C:\T"
+          Add-Content -Path $env:GITHUB_ENV -Value "TMP=C:\T"
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\FileSystem" /v LongPathsEnabled /t REG_DWORD /d 1 /f
+          git config --system core.longpaths true
+          Write-Host "TEMP -> C:\T, MAX_PATH limit lifted"
+
       - name: checkout llama.cpp submodule (shallow)
         shell: bash
         run: |
           git submodule sync --recursive
-          # Only fetch the top-level llama.cpp (--depth 1). Do NOT use --recursive!
-          # At commit 34688f3, vulkan-shaders is already a plain directory (llama.cpp
-          # has no .gitmodules of its own). Once --recursive descends into llama.cpp and
-          # reads its "leftover nested-submodule config", git treats vulkan-shaders as an
-          # empty submodule and clears it, so Windows (Vulkan=ON) fails with
-          # "No download info given for 'vulkan-shaders-gen'". llama.cpp has no real nested
-          # submodules, so --init alone is enough; without --recursive, vulkan-shaders lands
-          # as a plain directory.
+          # --depth 1, and deliberately NOT --recursive: llama.cpp has no real nested
+          # submodules, and --recursive makes git treat ggml-vulkan/vulkan-shaders as an
+          # empty submodule and wipe it, which then breaks every Vulkan build.
           git submodule update --init --depth 1
-          D=llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders
-          # vulkan-shaders is a plain directory in llama.cpp (no nested submodule), so a plain
-          # `git submodule update --init` already populates it - verified at 188 files. Just
-          # report the count so any future regression is visible in the log.
-          echo "vulkan-shaders entries: $(ls -1 "$D" 2>/dev/null | wc -l)"
+          echo "vulkan-shaders entries: $(ls -1 llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders 2>/dev/null | wc -l)"
 
       - uses: pnpm/action-setup@v4
         with:
@@ -235,20 +258,11 @@ jobs:
         shell: bash
         run: |
           git submodule sync --recursive
-          # Only fetch the top-level llama.cpp (--depth 1). Do NOT use --recursive!
-          # At commit 34688f3, vulkan-shaders is already a plain directory (llama.cpp
-          # has no .gitmodules of its own). Once --recursive descends into llama.cpp and
-          # reads its "leftover nested-submodule config", git treats vulkan-shaders as an
-          # empty submodule and clears it, so Windows (Vulkan=ON) fails with
-          # "No download info given for 'vulkan-shaders-gen'". llama.cpp has no real nested
-          # submodules, so --init alone is enough; without --recursive, vulkan-shaders lands
-          # as a plain directory.
+          # --depth 1, and deliberately NOT --recursive: llama.cpp has no real nested
+          # submodules, and --recursive makes git treat ggml-vulkan/vulkan-shaders as an
+          # empty submodule and wipe it, which then breaks every Vulkan build.
           git submodule update --init --depth 1
-          D=llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders
-          # vulkan-shaders is a plain directory in llama.cpp (no nested submodule), so a plain
-          # `git submodule update --init` already populates it - verified at 188 files. Just
-          # report the count so any future regression is visible in the log.
-          echo "vulkan-shaders entries: $(ls -1 "$D" 2>/dev/null | wc -l)"
+          echo "vulkan-shaders entries: $(ls -1 llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders 2>/dev/null | wc -l)"
 
       - uses: pnpm/action-setup@v4
         with:
@@ -280,27 +294,44 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: install Vulkan + build dependencies
-        # ggml-vulkan compiles its shaders at build time with glslc and needs
-        # SPIRV-Headers; the Vulkan loader (libvulkan.so) itself comes from the
-        # NDK sysroot at link time, and the device supplies the real one at runtime.
+        # ggml-vulkan compiles its shaders at build time with glslc; the Vulkan loader
+        # (libvulkan.so) itself comes from the NDK sysroot at link time, and the device
+        # supplies the real one at runtime.
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             build-essential cmake clang llvm-dev libclang-dev \
             libvulkan-dev glslang-tools glslc \
             spirv-headers spirv-tools
-          # ggml-vulkan also includes <vulkan/vulkan.hpp> (the Vulkan-Hpp C++ bindings). The
-          # NDK sysroot only ships the C header vulkan/vulkan.h, so cross-compiling dies with
-          # "'vulkan/vulkan.hpp' file not found". Publish vulkan.hpp in an isolated include
-          # dir holding ONLY that file, so it can never shadow the NDK's own vulkan.h.
-          sudo mkdir -p /opt/vulkanhpp/vulkan
-          if [ -f /usr/include/vulkan/vulkan.hpp ]; then
-            sudo cp /usr/include/vulkan/vulkan.hpp /opt/vulkanhpp/vulkan/
-          else
-            sudo curl -sL --retry 3 -o /opt/vulkanhpp/vulkan/vulkan.hpp \
-              https://raw.githubusercontent.com/KhronosGroup/Vulkan-Hpp/main/vulkan/vulkan.hpp
-          fi
-          ls -l /opt/vulkanhpp/vulkan/vulkan.hpp
+
+          # ggml-vulkan includes <vulkan/vulkan.hpp> (Vulkan-Hpp C++ bindings). The NDK sysroot
+          # only ships the C header vulkan/vulkan.h, so the cross-compile dies with
+          # "'vulkan/vulkan.hpp' file not found". Copying vulkan.hpp alone is not enough
+          # either - it #includes vulkan_hpp_macros.hpp, vulkan_enums.hpp, ... - so stage a
+          # complete, version-matched snapshot of BOTH repos:
+          #
+          #   /opt/vkh/vulkan/*.h      (Vulkan-Headers, C headers)
+          #   /opt/vulkanhpp/vulkan/*.hpp  (Vulkan-Hpp, C++ bindings)
+          #
+          # The pair has to come from the same release: ggml-vulkan-types.h picks the
+          # dispatcher namespace from VK_HEADER_VERSION (>= 301 -> vk::detail, below ->
+          # vk), so mixing a new vulkan.hpp with the NDK's older vulkan.h takes the wrong
+          # branch. Both dirs are isolated and only hold the vulkan/ subdirectory, so
+          # nothing else on the include path can be shadowed.
+          VULKAN_SNAPSHOT=v1.4.313
+          sudo mkdir -p /opt/vkh /opt/vulkanhpp
+          curl -sSL --retry 3 --fail --max-time 300 \
+            "https://codeload.github.com/KhronosGroup/Vulkan-Headers/tar.gz/refs/tags/$VULKAN_SNAPSHOT" \
+            | sudo tar -xz -C /opt/vkh --wildcards --strip-components=2 '*/include/vulkan'
+          curl -sSL --retry 3 --fail --max-time 300 \
+            "https://codeload.github.com/KhronosGroup/Vulkan-Hpp/tar.gz/refs/tags/$VULKAN_SNAPSHOT" \
+            | sudo tar -xz -C /opt/vulkanhpp --wildcards --strip-components=1 '*/vulkan'
+          sudo chmod -R a+rX /opt/vkh /opt/vulkanhpp
+          ls /opt/vkh/vulkan/vulkan.h \
+             /opt/vulkanhpp/vulkan/vulkan.hpp \
+             /opt/vulkanhpp/vulkan/vulkan_hpp_macros.hpp
+          grep -m1 'define VK_HEADER_VERSION' /opt/vkh/vulkan/vulkan_core.h
+          echo "VULKAN_HEADERS_INCLUDE=/opt/vkh" >> $GITHUB_ENV
           echo "VULKAN_HPP_INCLUDE=/opt/vulkanhpp" >> $GITHUB_ENV
 
       # tauri-action does NOT create the Android Studio project, and it is not
@@ -350,20 +381,11 @@ jobs:
         shell: bash
         run: |
           git submodule sync --recursive
-          # Only fetch the top-level llama.cpp (--depth 1). Do NOT use --recursive!
-          # At commit 34688f3, vulkan-shaders is already a plain directory (llama.cpp
-          # has no .gitmodules of its own). Once --recursive descends into llama.cpp and
-          # reads its "leftover nested-submodule config", git treats vulkan-shaders as an
-          # empty submodule and clears it, so Windows (Vulkan=ON) fails with
-          # "No download info given for 'vulkan-shaders-gen'". llama.cpp has no real nested
-          # submodules, so --init alone is enough; without --recursive, vulkan-shaders lands
-          # as a plain directory.
+          # --depth 1, and deliberately NOT --recursive: llama.cpp has no real nested
+          # submodules, and --recursive makes git treat ggml-vulkan/vulkan-shaders as an
+          # empty submodule and wipe it, which then breaks every Vulkan build.
           git submodule update --init --depth 1
-          D=llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders
-          # vulkan-shaders is a plain directory in llama.cpp (no nested submodule), so a plain
-          # `git submodule update --init` already populates it - verified at 188 files. Just
-          # report the count so any future regression is visible in the log.
-          echo "vulkan-shaders entries: $(ls -1 "$D" 2>/dev/null | wc -l)"
+          echo "vulkan-shaders entries: $(ls -1 llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders 2>/dev/null | wc -l)"
 
       - uses: pnpm/action-setup@v4
         with:
