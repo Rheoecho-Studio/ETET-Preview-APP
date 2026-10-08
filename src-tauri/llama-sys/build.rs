@@ -163,19 +163,21 @@ fn main() {
         cfg.define("GGML_NATIVE", "OFF");
     }
 
-    // 关键：不能只 define 选中的那一个。ggml-backend-reg.cpp 的注册表是按这些
-    // cmake 开关编译的，只要某个后端没被显式关掉（llama.cpp 自己会按平台默认
-    // 打开），就会编译进 *_reg 的调用，链接时找不到对应的静态库：
+    // KEY: we must not define only the one backend we selected. ggml-backend-reg.cpp
+    // compiles its registry from these cmake switches; any backend not explicitly turned
+    // OFF (llama.cpp enables some by platform default) gets a *_reg reference compiled in,
+    // which then fails to link because the static lib is absent:
     //   macOS / iOS -> "_ggml_backend_blas_reg"
-    //   iOS 模拟器  -> "_ggml_backend_metal_reg"
+    //   iOS simulator -> "_ggml_backend_metal_reg"
     cfg.define("GGML_BLAS", "OFF");
     cfg.define("GGML_METAL", if backend == "metal" { "ON" } else { "OFF" });
     cfg.define("GGML_VULKAN", if backend == "vulkan" { "ON" } else { "OFF" });
     cfg.define("GGML_OPENCL", if backend == "opencl" { "ON" } else { "OFF" });
-    // ggml-cpu 在 Apple 平台默认用 vDSP(Accelerate)。macOS 在 Rust 链接阶段已经显式
-    // 加了 Accelerate.framework，保留 ON 没问题；但 iOS 的链接发生在 Xcode 工程里，
-    // Xcode 不会自动带上 Accelerate.framework，于是报 ld: symbol(s) not found: _vDSP_vadd
-    // 等。iOS 直接关掉，ggml-cpu 走纯 C 实现，链接阶段就不需要 Accelerate 了。
+    // ggml-cpu uses vDSP (Accelerate) on Apple platforms by default. macOS already links
+    // Accelerate.framework explicitly at the Rust link step, so leaving it ON is fine there;
+    // but iOS links inside the Xcode project, which does not auto-add Accelerate.framework,
+    // causing "ld: symbol(s) not found: _vDSP_vadd" etc. Turn it OFF for iOS so ggml-cpu
+    // uses its pure-C path and needs no Accelerate at link time.
     cfg.define("GGML_ACCELERATE", if is_ios { "OFF" } else { "ON" });
     if backend == "metal" && is_ios && !is_ios_sim {
         // iOS apps cannot ship a loose .metallib; embed it in the binary.
@@ -210,6 +212,16 @@ fn main() {
         cfg.define("ANDROID_ABI", android_abi(&target));
         cfg.define("ANDROID_PLATFORM", &platform);
         cfg.define("ANDROID_STL", "c++_shared");
+        // ggml-vulkan needs the host's SPIRV-Headers at build time to compile its shaders.
+        // The NDK cross-compile toolchain restricts find_package to the sysroot, so it cannot
+        // find the SPIRV-Headers installed via apt, failing with
+        // "Could not find a package configuration file provided by SPIRV-Headers".
+        // Point it straight at the host's config dir (the Android job always runs on an
+        // x86_64 Linux runner).
+        cfg.define(
+            "SPIRV-Headers_DIR",
+            "/usr/lib/x86_64-linux-gnu/cmake/SPIRV-Headers",
+        );
 
         let prebuilt = ndk
             .join("toolchains/llvm/prebuilt")
@@ -230,18 +242,19 @@ fn main() {
     // Xcode SDK's DefaultDeploymentTarget (e.g. 10.13) and the compile dies
     // with "'path' is unavailable: introduced in macOS 10.15".
     if is_macos {
-        // 注意：这里绝对不能读 MACOSX_DEPLOYMENT_TARGET！
-        // macOS runner 镜像本身就把它设成了 10.13，workflow 里 export 的新值
-        // 在 build script 进程里可能仍是 10.13，会直接把部署目标打回 10.13。
-        // 所以用专用 knob LLAMA_MACOS_MIN_VERSION，默认 11.0（第一个 ARM 版 macOS）。
+        // IMPORTANT: never read MACOSX_DEPLOYMENT_TARGET here!
+        // The macOS runner image already sets it to 10.13, and a value exported by the
+        // workflow may still read as 10.13 inside the build-script process, forcing the
+        // deployment target back to 10.13. So we use a dedicated knob, LLAMA_MACOS_MIN_VERSION,
+        // defaulting to 11.0 (first Apple Silicon macOS).
         let min_version =
             first_env(&["LLAMA_MACOS_MIN_VERSION"]).unwrap_or_else(|| "11.0".to_string());
         cfg.define("CMAKE_OSX_DEPLOYMENT_TARGET", &min_version);
 
-        // cmake-rs 会把 cc 推导出来的 base flags 塞进 CMAKE_{C,CXX,ASM}_FLAGS，
-        // 其中带 -mmacosx-version-min=<Xcode SDK 默认>，光靠 MACOSX_DEPLOYMENT_TARGET
-        // 环境变量经常盖不住。一旦我们自己 define 了这几个变量，cmake-rs 就
-        // 不会再追加它那一份，所以这里完全自己给，版本写死在 target triple 里。
+        // cmake-rs injects cc's derived base flags into CMAKE_{C,CXX,ASM}_FLAGS, including
+        // -mmacosx-version-min=<Xcode SDK default>; MACOSX_DEPLOYMENT_TARGET alone often
+        // fails to override it. Once we define these vars ourselves, cmake-rs stops appending
+        // its own, so we supply them fully here with the version baked into the target triple.
         let arch = if target.starts_with("aarch64") {
             "arm64"
         } else {
@@ -256,14 +269,14 @@ fn main() {
         cfg.define("CMAKE_CXX_FLAGS", &common);
         cfg.define("CMAKE_ASM_FLAGS", &common);
 
-        // 下面编译 shim.cpp 的 cc::Build 会读它，无条件覆盖成我们要的值。
+        // The cc::Build that compiles shim.cpp below reads this; override it unconditionally.
         env::set_var("MACOSX_DEPLOYMENT_TARGET", &min_version);
 
-        // ggml-metal 的 Objective-C 文件(ggml-metal-device.m)用了 @available(macOS ...)，
-        // clang 会插入对 __isPlatformVersionAtLeast 的调用；而 rustc 默认对 macOS 可执行
-        // 文件用 -nodefaultlibs，跳过 clang 的 runtime 库，最终链接就报
-        // Undefined symbols for architecture arm64: "___isPlatformVersionAtLeast"。
-        // 补上 libclang_rt.osx.a（用 clang --print-runtime-dir 定位，不要在代码里写死路径）。
+        // ggml-metal's Objective-C file (ggml-metal-device.m) uses @available(macOS ...), so
+        // clang emits a call to __isPlatformVersionAtLeast. rustc links macOS executables with
+        // -nodefaultlibs by default, skipping clang's runtime lib, which then fails at link time
+        // with "Undefined symbols for architecture arm64: ___isPlatformVersionAtLeast".
+        // Add libclang_rt.osx.a (located via clang --print-runtime-dir, never hard-coded).
         if let Ok(out) = std::process::Command::new("clang").arg("--print-runtime-dir").output() {
             let rt = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !rt.is_empty() {
@@ -375,8 +388,9 @@ fn main() {
         println!("cargo:rustc-link-lib=framework=CoreFoundation");
         println!("cargo:rustc-link-lib=framework=CoreGraphics");
         println!("cargo:rustc-link-lib=framework=QuartzCore");
-        // ggml-cpu 用 -mcpu=applesilicon 走 vDSP 加速 *_vadd/_vsmul/...，
-        // 少了这个会在最终链接阶段报 ld: symbol(s) not found for architecture arm64。
+        // ggml-cpu uses -mcpu=applesilicon with vDSP to accelerate *_vadd/_vsmul/...;
+        // without this framework the final link fails with
+        // "ld: symbol(s) not found for architecture arm64".
         println!("cargo:rustc-link-lib=framework=Accelerate");
         println!("cargo:rustc-link-lib=dylib=c++");
     } else if is_android {
@@ -403,9 +417,9 @@ fn main() {
     // plain libc types and every supported target is LP64, so the layout matches.
     // If a toolchain ever disagrees, override per target with
     // BINDGEN_EXTRA_CLANG_ARGS_<TARGET> (clang-sys picks it up automatically).
-    // Android 交叉编译时必须显式给 clang 目标 tarball 和 NDK sysroot，
-    // 否则 clang 按宿主机找头文件，会报
-    // "/usr/include/stdint.h:26:10: fatal error: 'bits/libc-header-start.h' file not found"。
+    // For Android cross-compilation, clang must be given the target triple and NDK sysroot
+    // explicitly, otherwise it searches the host's headers and fails with
+    // "/usr/include/stdint.h:26:10: fatal error: 'bits/libc-header-start.h' file not found".
     let mut bindings = bindgen::Builder::default()
         .header("wrapper.h")
         .clang_arg(format!("-I{}", llama_dir.join("include").display()))
