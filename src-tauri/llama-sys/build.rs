@@ -172,6 +172,11 @@ fn main() {
     cfg.define("GGML_METAL", if backend == "metal" { "ON" } else { "OFF" });
     cfg.define("GGML_VULKAN", if backend == "vulkan" { "ON" } else { "OFF" });
     cfg.define("GGML_OPENCL", if backend == "opencl" { "ON" } else { "OFF" });
+    // ggml-cpu 在 Apple 平台默认用 vDSP(Accelerate)。macOS 在 Rust 链接阶段已经显式
+    // 加了 Accelerate.framework，保留 ON 没问题；但 iOS 的链接发生在 Xcode 工程里，
+    // Xcode 不会自动带上 Accelerate.framework，于是报 ld: symbol(s) not found: _vDSP_vadd
+    // 等。iOS 直接关掉，ggml-cpu 走纯 C 实现，链接阶段就不需要 Accelerate 了。
+    cfg.define("GGML_ACCELERATE", if is_ios { "OFF" } else { "ON" });
     if backend == "metal" && is_ios && !is_ios_sim {
         // iOS apps cannot ship a loose .metallib; embed it in the binary.
         cfg.define("GGML_METAL_EMBED_LIBRARY", "ON");
@@ -253,6 +258,19 @@ fn main() {
 
         // 下面编译 shim.cpp 的 cc::Build 会读它，无条件覆盖成我们要的值。
         env::set_var("MACOSX_DEPLOYMENT_TARGET", &min_version);
+
+        // ggml-metal 的 Objective-C 文件(ggml-metal-device.m)用了 @available(macOS ...)，
+        // clang 会插入对 __isPlatformVersionAtLeast 的调用；而 rustc 默认对 macOS 可执行
+        // 文件用 -nodefaultlibs，跳过 clang 的 runtime 库，最终链接就报
+        // Undefined symbols for architecture arm64: "___isPlatformVersionAtLeast"。
+        // 补上 libclang_rt.osx.a（用 clang --print-runtime-dir 定位，不要在代码里写死路径）。
+        if let Ok(out) = std::process::Command::new("clang").arg("--print-runtime-dir").output() {
+            let rt = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !rt.is_empty() {
+                println!("cargo:rustc-link-search=native={rt}");
+                println!("cargo:rustc-link-lib=static=clang_rt.osx");
+            }
+        }
     }
 
     if is_ios {
