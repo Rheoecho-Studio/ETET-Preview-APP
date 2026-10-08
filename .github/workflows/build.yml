@@ -310,7 +310,9 @@ jobs:
           # either - it #includes vulkan_hpp_macros.hpp, vulkan_enums.hpp, ... - so stage a
           # complete, version-matched snapshot of BOTH repos:
           #
-          #   /opt/vkh/vulkan/*.h      (Vulkan-Headers, C headers)
+          #   /opt/vkh/vulkan/*.h          (Vulkan-Headers, Vulkan C headers)
+          #   /opt/vkh/vk_video/*.h        (Vulkan-Headers, video codec headers -
+          #                                 vulkan_core.h includes them unconditionally)
           #   /opt/vulkanhpp/vulkan/*.hpp  (Vulkan-Hpp, C++ bindings)
           #
           # The pair has to come from the same release: ggml-vulkan-types.h picks the
@@ -322,12 +324,13 @@ jobs:
           sudo mkdir -p /opt/vkh /opt/vulkanhpp
           curl -sSL --retry 3 --fail --max-time 300 \
             "https://codeload.github.com/KhronosGroup/Vulkan-Headers/tar.gz/refs/tags/$VULKAN_SNAPSHOT" \
-            | sudo tar -xz -C /opt/vkh --wildcards --strip-components=2 '*/include/vulkan'
+            | sudo tar -xz -C /opt/vkh --wildcards --strip-components=2 '*/include/*'
           curl -sSL --retry 3 --fail --max-time 300 \
             "https://codeload.github.com/KhronosGroup/Vulkan-Hpp/tar.gz/refs/tags/$VULKAN_SNAPSHOT" \
             | sudo tar -xz -C /opt/vulkanhpp --wildcards --strip-components=1 '*/vulkan'
           sudo chmod -R a+rX /opt/vkh /opt/vulkanhpp
           ls /opt/vkh/vulkan/vulkan.h \
+             /opt/vkh/vk_video/vulkan_video_codec_av1std.h \
              /opt/vulkanhpp/vulkan/vulkan.hpp \
              /opt/vulkanhpp/vulkan/vulkan_hpp_macros.hpp
           grep -m1 'define VK_HEADER_VERSION' /opt/vkh/vulkan/vulkan_core.h

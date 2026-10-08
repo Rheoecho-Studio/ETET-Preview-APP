@@ -433,6 +433,18 @@ fn main() {
         "cargo:rustc-link-search=native={}",
         build_dir.join("vendor/hash").display()
     );
+    if is_windows && is_msvc {
+        // Visual Studio is a multi-config generator, so it appends $<CONFIG> to the archive
+        // output directory: vendor-hash.lib lands in <build>/vendor/hash/Release/, whereas
+        // the Makefile/Ninja generators used on Linux/macOS put it straight in
+        // <build>/vendor/hash/. Without this extra search path the link dies with
+        // "could not find native static library `vendor-hash`, perhaps an -L flag is missing?".
+        // (Everything else is linked from the install prefix, which has no config subdir.)
+        println!(
+            "cargo:rustc-link-search=native={}",
+            build_dir.join("vendor/hash/Release").display()
+        );
+    }
     if let Some((sysroot, triple)) = &android {
         // NDK's C++ runtime / libm live here and are not on rustc's default path
         println!(
