@@ -212,16 +212,26 @@ fn main() {
         cfg.define("ANDROID_ABI", android_abi(&target));
         cfg.define("ANDROID_PLATFORM", &platform);
         cfg.define("ANDROID_STL", "c++_shared");
-        // ggml-vulkan needs the host's SPIRV-Headers at build time to compile its shaders.
-        // The NDK cross-compile toolchain restricts find_package to the sysroot, so it cannot
-        // find the SPIRV-Headers installed via apt, failing with
-        // "Could not find a package configuration file provided by SPIRV-Headers".
-        // Point it straight at the host's config dir (the Android job always runs on an
-        // x86_64 Linux runner).
-        cfg.define(
-            "SPIRV-Headers_DIR",
-            "/usr/lib/x86_64-linux-gnu/cmake/SPIRV-Headers",
-        );
+        // ggml-vulkan calls `find_package(SPIRV-Headers CONFIG REQUIRED)`, but never actually
+        // uses the package afterwards (no include dirs, no linked target). Under the NDK
+        // cross-compile toolchain find_package is restricted to the sysroot and cannot see the
+        // host's SPIRV-Headers, so configure dies with "Could not find a package configuration
+        // file provided by SPIRV-Headers". Point it at a generated stub config; if a real
+        // installation should be used instead, set SPIRV_HEADERS_DIR to its cmake dir.
+        let spirv_dir = match first_env(&["SPIRV_HEADERS_DIR"]) {
+            Some(dir) => PathBuf::from(dir),
+            None => {
+                let stub = PathBuf::from(env::var("OUT_DIR").unwrap()).join("spirv-headers-cmake");
+                std::fs::create_dir_all(&stub).expect("failed to create SPIRV-Headers stub dir");
+                std::fs::write(
+                    stub.join("SPIRV-HeadersConfig.cmake"),
+                    "set(SPIRV-Headers_FOUND TRUE)\n",
+                )
+                .expect("failed to write SPIRV-Headers stub config");
+                stub
+            }
+        };
+        cfg.define("SPIRV-Headers_DIR", spirv_dir.display().to_string());
 
         let prebuilt = ndk
             .join("toolchains/llvm/prebuilt")

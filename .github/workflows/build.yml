@@ -63,27 +63,25 @@ jobs:
           # as a plain directory.
           git submodule update --init --depth 1
           D=llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders
+          # Diagnostics: how many files actually landed in vulkan-shaders.
+          echo "vulkan-shaders entries before: $(ls -1 "$D" 2>/dev/null | wc -l)"
           # vulkan-shaders is a plain dir at 34688f3 (llama.cpp has no .gitmodules), but on
-          # Windows `git submodule update` sometimes does not populate it into the worktree,
-          # leaving it empty and making ggml-vulkan fail with
-          # "No download info given for 'vulkan-shaders-gen'".
-          # Extract its contents straight from the commit tree with git archive: cross-platform
-          # and needs no network since llama.cpp is already cloned.
+          # Windows `git submodule update` sometimes leaves it empty, making ggml-vulkan fail
+          # with "No download info given for 'vulkan-shaders-gen'". Restore it straight from
+          # the upstream tarball instead of git archive / sparse checkout, whose path handling
+          # and failure modes vary per platform (and can fail silently).
           if [ ! -f "$D/vulkan-shaders-gen.cpp" ]; then
-            rm -rf "$D"
-            git -C llama.cpp archive HEAD ggml/src/ggml-vulkan/vulkan-shaders \
-              | tar -x --strip-components=3 -C "$D/.." 2>/dev/null || true
-          fi
-          # Fallback: if git archive also fails (rare), overwrite from an upstream sparse clone.
-          if [ ! -f "$D/vulkan-shaders-gen.cpp" ]; then
+            echo "vulkan-shaders missing -> restoring from upstream tarball"
             T=$(mktemp -d)
-            git clone --filter=blob:none --no-checkout https://github.com/mirn0410/llama.cpp "$T"
-            git -C "$T" fetch origin 34688f3dc1daf4cba0a4a6e97597ee1f88d79487
-            git -C "$T" checkout 34688f3dc1daf4cba0a4a6e97597ee1f88d79487 -- ggml/src/ggml-vulkan/vulkan-shaders
+            curl -sL --retry 3 --max-time 300 \
+              "https://codeload.github.com/mirn0410/llama.cpp/tar.gz/34688f3dc1daf4cba0a4a6e97597ee1f88d79487" \
+              -o "$T/ll.tgz"
+            tar xzf "$T/ll.tgz" -C "$T"
             rm -rf "$D"; mkdir -p "$D"
-            cp -rf "$T/ggml/src/ggml-vulkan/vulkan-shaders/." "$D/"
+            cp -rf "$T"/llama.cpp-*/ggml/src/ggml-vulkan/vulkan-shaders/. "$D/"
             rm -rf "$T"
           fi
+          echo "vulkan-shaders entries after: $(ls -1 "$D" 2>/dev/null | wc -l)"
 
       - uses: pnpm/action-setup@v4
         with:
@@ -212,6 +210,26 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "LIBCLANG_PATH=C:\LLVM\bin"
           Add-Content -Path $env:GITHUB_PATH -Value "C:\LLVM\bin"
 
+      # The Windows image ships CMake 4.4, whose ExternalProject turns SOURCE_DIR into an
+      # extended-length path ("//?/D:/..."). CMake's own file(GLOB) cannot read that form, so
+      # ExternalProject_Add(vulkan-shaders-gen) fails with
+      # "No download info given ... is not an existing non-empty directory" even when the
+      # directory really is populated. Linux builds fine on 3.31, so pin that version here.
+      - name: install CMake 3.31 (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          $zip = "$env:RUNNER_TEMP\cmake-3.31.zip"
+          Invoke-WebRequest `
+            -Uri "https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-windows-x86_64.zip" `
+            -OutFile $zip -TimeoutSec 300
+          Expand-Archive -Path $zip -DestinationPath "C:\cmake331" -Force
+          $exe = Get-ChildItem -Path "C:\cmake331" -Recurse -Filter cmake.exe |
+                   Select-Object -First 1
+          if (-not $exe) { throw "cmake.exe not found after extraction" }
+          Add-Content -Path $env:GITHUB_PATH -Value $exe.DirectoryName
+          & $exe.FullName --version
+
       # Pinned to the released action-v1.0.0
       # (commit 1deb371b0cd8bd54025b384f1cd735e725c4060f) instead of the floating
       # @v1 tag, so an upstream change cannot silently break CI.
@@ -257,27 +275,25 @@ jobs:
           # as a plain directory.
           git submodule update --init --depth 1
           D=llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders
+          # Diagnostics: how many files actually landed in vulkan-shaders.
+          echo "vulkan-shaders entries before: $(ls -1 "$D" 2>/dev/null | wc -l)"
           # vulkan-shaders is a plain dir at 34688f3 (llama.cpp has no .gitmodules), but on
-          # Windows `git submodule update` sometimes does not populate it into the worktree,
-          # leaving it empty and making ggml-vulkan fail with
-          # "No download info given for 'vulkan-shaders-gen'".
-          # Extract its contents straight from the commit tree with git archive: cross-platform
-          # and needs no network since llama.cpp is already cloned.
+          # Windows `git submodule update` sometimes leaves it empty, making ggml-vulkan fail
+          # with "No download info given for 'vulkan-shaders-gen'". Restore it straight from
+          # the upstream tarball instead of git archive / sparse checkout, whose path handling
+          # and failure modes vary per platform (and can fail silently).
           if [ ! -f "$D/vulkan-shaders-gen.cpp" ]; then
-            rm -rf "$D"
-            git -C llama.cpp archive HEAD ggml/src/ggml-vulkan/vulkan-shaders \
-              | tar -x --strip-components=3 -C "$D/.." 2>/dev/null || true
-          fi
-          # Fallback: if git archive also fails (rare), overwrite from an upstream sparse clone.
-          if [ ! -f "$D/vulkan-shaders-gen.cpp" ]; then
+            echo "vulkan-shaders missing -> restoring from upstream tarball"
             T=$(mktemp -d)
-            git clone --filter=blob:none --no-checkout https://github.com/mirn0410/llama.cpp "$T"
-            git -C "$T" fetch origin 34688f3dc1daf4cba0a4a6e97597ee1f88d79487
-            git -C "$T" checkout 34688f3dc1daf4cba0a4a6e97597ee1f88d79487 -- ggml/src/ggml-vulkan/vulkan-shaders
+            curl -sL --retry 3 --max-time 300 \
+              "https://codeload.github.com/mirn0410/llama.cpp/tar.gz/34688f3dc1daf4cba0a4a6e97597ee1f88d79487" \
+              -o "$T/ll.tgz"
+            tar xzf "$T/ll.tgz" -C "$T"
             rm -rf "$D"; mkdir -p "$D"
-            cp -rf "$T/ggml/src/ggml-vulkan/vulkan-shaders/." "$D/"
+            cp -rf "$T"/llama.cpp-*/ggml/src/ggml-vulkan/vulkan-shaders/. "$D/"
             rm -rf "$T"
           fi
+          echo "vulkan-shaders entries after: $(ls -1 "$D" 2>/dev/null | wc -l)"
 
       - uses: pnpm/action-setup@v4
         with:
@@ -376,27 +392,25 @@ jobs:
           # as a plain directory.
           git submodule update --init --depth 1
           D=llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders
+          # Diagnostics: how many files actually landed in vulkan-shaders.
+          echo "vulkan-shaders entries before: $(ls -1 "$D" 2>/dev/null | wc -l)"
           # vulkan-shaders is a plain dir at 34688f3 (llama.cpp has no .gitmodules), but on
-          # Windows `git submodule update` sometimes does not populate it into the worktree,
-          # leaving it empty and making ggml-vulkan fail with
-          # "No download info given for 'vulkan-shaders-gen'".
-          # Extract its contents straight from the commit tree with git archive: cross-platform
-          # and needs no network since llama.cpp is already cloned.
+          # Windows `git submodule update` sometimes leaves it empty, making ggml-vulkan fail
+          # with "No download info given for 'vulkan-shaders-gen'". Restore it straight from
+          # the upstream tarball instead of git archive / sparse checkout, whose path handling
+          # and failure modes vary per platform (and can fail silently).
           if [ ! -f "$D/vulkan-shaders-gen.cpp" ]; then
-            rm -rf "$D"
-            git -C llama.cpp archive HEAD ggml/src/ggml-vulkan/vulkan-shaders \
-              | tar -x --strip-components=3 -C "$D/.." 2>/dev/null || true
-          fi
-          # Fallback: if git archive also fails (rare), overwrite from an upstream sparse clone.
-          if [ ! -f "$D/vulkan-shaders-gen.cpp" ]; then
+            echo "vulkan-shaders missing -> restoring from upstream tarball"
             T=$(mktemp -d)
-            git clone --filter=blob:none --no-checkout https://github.com/mirn0410/llama.cpp "$T"
-            git -C "$T" fetch origin 34688f3dc1daf4cba0a4a6e97597ee1f88d79487
-            git -C "$T" checkout 34688f3dc1daf4cba0a4a6e97597ee1f88d79487 -- ggml/src/ggml-vulkan/vulkan-shaders
+            curl -sL --retry 3 --max-time 300 \
+              "https://codeload.github.com/mirn0410/llama.cpp/tar.gz/34688f3dc1daf4cba0a4a6e97597ee1f88d79487" \
+              -o "$T/ll.tgz"
+            tar xzf "$T/ll.tgz" -C "$T"
             rm -rf "$D"; mkdir -p "$D"
-            cp -rf "$T/ggml/src/ggml-vulkan/vulkan-shaders/." "$D/"
+            cp -rf "$T"/llama.cpp-*/ggml/src/ggml-vulkan/vulkan-shaders/. "$D/"
             rm -rf "$T"
           fi
+          echo "vulkan-shaders entries after: $(ls -1 "$D" 2>/dev/null | wc -l)"
 
       - uses: pnpm/action-setup@v4
         with:
@@ -420,11 +434,37 @@ jobs:
       - name: generate Xcode project
         run: pnpm tauri ios init
 
-      # No Apple developer account needed: build the device arch (Metal backend) but disable
-      # Xcode signing (CODE_SIGNING_ALLOWED=NO) to produce an UNSIGNED .app. Below we manually
-      # zip it into an unsigned .ipa (an IPA is just a Payload/ directory). Users download it
-      # and self-sign with their own Apple ID. No dev account, no secrets required.
+      # No Apple developer account here, so the app has to be built unsigned. Passing
+      # CODE_SIGNING_ALLOWED=NO through tauri's `args` does NOT work: tauri keeps it for
+      # itself and never forwards it to xcodebuild (the log shows xcodebuild invoked with
+      # only "-allowProvisioningUpdates ... build"), so the build still dies with
+      # 'Signing for "etet-preview_iOS" requires a development team'. Flip the signing
+      # settings directly in the generated project.pbxproj instead.
+      - name: disable code signing in Xcode project
+        shell: bash
+        run: |
+          PB=src-tauri/gen/apple/etet-preview.xcodeproj/project.pbxproj
+          if [ ! -f "$PB" ]; then
+            echo "::error::project.pbxproj not found at $PB"
+            exit 1
+          fi
+          python3 - "$PB" <<'PY'
+          import re, sys
+          p = sys.argv[1]
+          s = open(p).read()
+          # drop any existing signing-related build settings
+          s = re.sub(r'\n\s*(CODE_SIGN_STYLE|CODE_SIGN_IDENTITY|CODE_SIGNING_ALLOWED|CODE_SIGNING_REQUIRED|DEVELOPMENT_TEAM|PROVISIONING_PROFILE_SPECIFIER)\s*=\s*.*?;', '', s)
+          # inject unsigned settings into every buildSettings block
+          s = re.sub(r'(buildSettings = \{\n)',
+              r'\1\t\t\t\tCODE_SIGN_STYLE = Manual;\n\t\t\t\tCODE_SIGN_IDENTITY = "";\n\t\t\t\tCODE_SIGNING_ALLOWED = NO;\n\t\t\t\tCODE_SIGNING_REQUIRED = NO;\n\t\t\t\tDEVELOPMENT_TEAM = "";\n',
+              s)
+          open(p, 'w').write(s)
+          print("patched", p)
+          PY
 
+      # Build the device arch (Metal backend) unsigned; the .app is then zipped into an
+      # unsigned .ipa below (an IPA is just a Payload/ directory). Users download it and
+      # self-sign with their own Apple ID. No dev account, no secrets required.
       - uses: tauri-apps/tauri-action@action-v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -432,9 +472,9 @@ jobs:
         with:
           projectPath: ./src-tauri
           mobile: ios
-          # --target aarch64  = device arch (not -sim; simulator binaries can't run on a device)
-          # -- CODE_SIGNING_ALLOWED=NO = disable Xcode signing, produce unsigned .app
-          args: --target aarch64 -- CODE_SIGNING_ALLOWED=NO
+          # device arch (not -sim; simulator binaries cannot run on a device).
+          # Signing is already off via the patched Xcode project above.
+          args: --target aarch64
           # We package the unsigned IPA ourselves, so disable tauri-action's upload
           uploadWorkflowArtifacts: false
           workflowArtifactNamePattern: '[platform]-[arch]-[bundle]'
