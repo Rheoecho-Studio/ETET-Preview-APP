@@ -5,13 +5,14 @@ name: Build ETET-Preview
 #
 # llama.cpp is mounted as a git submodule (.gitmodules ->
 # https://github.com/mirn0410/llama.cpp, master branch). Every job runs
-# `git submodule update --init --recursive --depth 1` so CI does not have to
-# pull the ~450MB full history.
+# `git submodule update --init --depth 1` so CI does not have to
+# pull the ~450MB full history. (No --recursive: llama.cpp has no nested
+# submodules, and --recursive would wrongly clear its vulkan-shaders dir.)
 #
 # The GPU backend is chosen per platform in src-tauri/llama-sys/build.rs:
-#   Windows / Linux -> Vulkan (required, CPU-only builds are broken)
+#   Windows / Linux / Android -> Vulkan (CPU-only builds are broken)
 #   macOS / iOS device -> Metal
-#   Android / iOS simulator -> CPU
+#   iOS simulator -> CPU (no Metal in the simulator)
 # Override with LLAMA_GPU_BACKEND=cpu|metal|vulkan|opencl if needed.
 
 on:
@@ -51,16 +52,30 @@ jobs:
         shell: bash
         run: |
           git submodule sync --recursive
-          git submodule update --init --recursive --depth 1
-          # llama.cpp 在其 34688f3 这个 commit 已经把 vulkan-shaders 从嵌套 submodule
-          # 改成了普通目录（仓库没有 .gitmodules）。不要再递归进 llama.cpp —— 否则 git
-          # 会把 vulkan-shaders 当成残留的 gitlink 清空，Windows(Vulkan=ON) 就会报
-          # "No download info given for 'vulkan-shaders-gen'"。
-          # 万一 git 缓存仍把它清空，就按当前 HEAD tree 强制还原成普通目录。
+          # 只拉 llama.cpp 顶层（--depth 1），不要 --recursive！
+          # 在 34688f3 里 vulkan-shaders 已经是普通目录（llama.cpp 自身也没有 .gitmodules），
+          # 一旦 --recursive 进 llama.cpp 读它“残留的 nested-submodule 配置”，git 就会把
+          # vulkan-shaders 当成空 submodule 清空，Windows(Vulkan=ON) 随即报
+          # "No download info given for 'vulkan-shaders-gen'"。llama.cpp 没有真嵌套 submodule，
+          # 所以 --init 已足够，去掉 --recursive 后 vulkan-shaders 作为普通目录自然落盘。
+          git submodule update --init --depth 1
           D=llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders
           if [ ! -f "$D/vulkan-shaders-gen.cpp" ]; then
+            # 解除任何残留的 nested-submodule 登记，再把普通目录还原回来
+            git -C llama.cpp submodule deinit -f ggml/src/ggml-vulkan/vulkan-shaders 2>/dev/null || true
+            git -C llama.cpp reset HEAD -- ggml/src/ggml-vulkan/vulkan-shaders 2>/dev/null || true
             rm -rf "$D"
             git -C llama.cpp checkout HEAD -- ggml/src/ggml-vulkan/vulkan-shaders 2>/dev/null || true
+          fi
+          # 终极兜底（极少触发）：上面都救不回时，sparse-clone 上游该目录覆盖
+          if [ ! -f "$D/vulkan-shaders-gen.cpp" ]; then
+            T=$(mktemp -d)
+            git clone --filter=blob:none --no-checkout https://github.com/mirn0410/llama.cpp "$T"
+            git -C "$T" fetch origin 34688f3dc1daf4cba0a4a6e97597ee1f88d79487
+            git -C "$T" checkout 34688f3dc1daf4cba0a4a6e97597ee1f88d79487 -- ggml/src/ggml-vulkan/vulkan-shaders
+            mkdir -p "$D"
+            cp -rf "$T/ggml/src/ggml-vulkan/vulkan-shaders/." "$D/"
+            rm -rf "$T"
           fi
 
       - uses: pnpm/action-setup@v4
@@ -223,16 +238,30 @@ jobs:
         shell: bash
         run: |
           git submodule sync --recursive
-          git submodule update --init --recursive --depth 1
-          # llama.cpp 在其 34688f3 这个 commit 已经把 vulkan-shaders 从嵌套 submodule
-          # 改成了普通目录（仓库没有 .gitmodules）。不要再递归进 llama.cpp —— 否则 git
-          # 会把 vulkan-shaders 当成残留的 gitlink 清空，Windows(Vulkan=ON) 就会报
-          # "No download info given for 'vulkan-shaders-gen'"。
-          # 万一 git 缓存仍把它清空，就按当前 HEAD tree 强制还原成普通目录。
+          # 只拉 llama.cpp 顶层（--depth 1），不要 --recursive！
+          # 在 34688f3 里 vulkan-shaders 已经是普通目录（llama.cpp 自身也没有 .gitmodules），
+          # 一旦 --recursive 进 llama.cpp 读它“残留的 nested-submodule 配置”，git 就会把
+          # vulkan-shaders 当成空 submodule 清空，Windows(Vulkan=ON) 随即报
+          # "No download info given for 'vulkan-shaders-gen'"。llama.cpp 没有真嵌套 submodule，
+          # 所以 --init 已足够，去掉 --recursive 后 vulkan-shaders 作为普通目录自然落盘。
+          git submodule update --init --depth 1
           D=llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders
           if [ ! -f "$D/vulkan-shaders-gen.cpp" ]; then
+            # 解除任何残留的 nested-submodule 登记，再把普通目录还原回来
+            git -C llama.cpp submodule deinit -f ggml/src/ggml-vulkan/vulkan-shaders 2>/dev/null || true
+            git -C llama.cpp reset HEAD -- ggml/src/ggml-vulkan/vulkan-shaders 2>/dev/null || true
             rm -rf "$D"
             git -C llama.cpp checkout HEAD -- ggml/src/ggml-vulkan/vulkan-shaders 2>/dev/null || true
+          fi
+          # 终极兜底（极少触发）：上面都救不回时，sparse-clone 上游该目录覆盖
+          if [ ! -f "$D/vulkan-shaders-gen.cpp" ]; then
+            T=$(mktemp -d)
+            git clone --filter=blob:none --no-checkout https://github.com/mirn0410/llama.cpp "$T"
+            git -C "$T" fetch origin 34688f3dc1daf4cba0a4a6e97597ee1f88d79487
+            git -C "$T" checkout 34688f3dc1daf4cba0a4a6e97597ee1f88d79487 -- ggml/src/ggml-vulkan/vulkan-shaders
+            mkdir -p "$D"
+            cp -rf "$T/ggml/src/ggml-vulkan/vulkan-shaders/." "$D/"
+            rm -rf "$T"
           fi
 
       - uses: pnpm/action-setup@v4
@@ -263,6 +292,17 @@ jobs:
 
       - name: install frontend dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: install Vulkan + build dependencies
+        # ggml-vulkan compiles its shaders at build time with glslc and needs
+        # SPIRV-Headers; the Vulkan loader (libvulkan.so) itself comes from the
+        # NDK sysroot at link time, and the device supplies the real one at runtime.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake clang llvm-dev libclang-dev \
+            libvulkan-dev glslang-tools glslc \
+            spirv-headers spirv-tools
 
       # tauri-action does NOT create the Android Studio project, and it is not
       # committed either -> `tauri android build` aborted with
@@ -299,6 +339,7 @@ jobs:
   ios:
     permissions:
       contents: write
+      actions: write
     concurrency:
       group: build-${{ github.ref }}-ios
       cancel-in-progress: true
@@ -310,16 +351,30 @@ jobs:
         shell: bash
         run: |
           git submodule sync --recursive
-          git submodule update --init --recursive --depth 1
-          # llama.cpp 在其 34688f3 这个 commit 已经把 vulkan-shaders 从嵌套 submodule
-          # 改成了普通目录（仓库没有 .gitmodules）。不要再递归进 llama.cpp —— 否则 git
-          # 会把 vulkan-shaders 当成残留的 gitlink 清空，Windows(Vulkan=ON) 就会报
-          # "No download info given for 'vulkan-shaders-gen'"。
-          # 万一 git 缓存仍把它清空，就按当前 HEAD tree 强制还原成普通目录。
+          # 只拉 llama.cpp 顶层（--depth 1），不要 --recursive！
+          # 在 34688f3 里 vulkan-shaders 已经是普通目录（llama.cpp 自身也没有 .gitmodules），
+          # 一旦 --recursive 进 llama.cpp 读它“残留的 nested-submodule 配置”，git 就会把
+          # vulkan-shaders 当成空 submodule 清空，Windows(Vulkan=ON) 随即报
+          # "No download info given for 'vulkan-shaders-gen'"。llama.cpp 没有真嵌套 submodule，
+          # 所以 --init 已足够，去掉 --recursive 后 vulkan-shaders 作为普通目录自然落盘。
+          git submodule update --init --depth 1
           D=llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders
           if [ ! -f "$D/vulkan-shaders-gen.cpp" ]; then
+            # 解除任何残留的 nested-submodule 登记，再把普通目录还原回来
+            git -C llama.cpp submodule deinit -f ggml/src/ggml-vulkan/vulkan-shaders 2>/dev/null || true
+            git -C llama.cpp reset HEAD -- ggml/src/ggml-vulkan/vulkan-shaders 2>/dev/null || true
             rm -rf "$D"
             git -C llama.cpp checkout HEAD -- ggml/src/ggml-vulkan/vulkan-shaders 2>/dev/null || true
+          fi
+          # 终极兜底（极少触发）：上面都救不回时，sparse-clone 上游该目录覆盖
+          if [ ! -f "$D/vulkan-shaders-gen.cpp" ]; then
+            T=$(mktemp -d)
+            git clone --filter=blob:none --no-checkout https://github.com/mirn0410/llama.cpp "$T"
+            git -C "$T" fetch origin 34688f3dc1daf4cba0a4a6e97597ee1f88d79487
+            git -C "$T" checkout 34688f3dc1daf4cba0a4a6e97597ee1f88d79487 -- ggml/src/ggml-vulkan/vulkan-shaders
+            mkdir -p "$D"
+            cp -rf "$T/ggml/src/ggml-vulkan/vulkan-shaders/." "$D/"
+            rm -rf "$T"
           fi
 
       - uses: pnpm/action-setup@v4
@@ -334,7 +389,7 @@ jobs:
       - name: install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-ios-sim
+          targets: aarch64-apple-ios
 
       - name: install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -344,14 +399,44 @@ jobs:
       - name: generate Xcode project
         run: pnpm tauri ios init
 
+      # 把 Apple 开发者证书 + provisioning profile 导入本机钥匙串，供 Xcode 自动签名。
+      # 需要在仓库 Settings -> Secrets and variables -> Actions 里配置：
+      #   APPLE_CERTIFICATE           p12 证书（base64 编码）
+      #   APPLE_CERTIFICATE_PASSWORD  p12 导出密码
+      #   APPLE_PROVISIONING_PROFILE  .mobileprovision（base64 编码；Ad Hoc / Development 才能直接装）
+      #   APPLE_TEAM_ID               开发者团队 ID（10 位字母数字）
+      - name: import iOS signing certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_PROVISIONING_PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "::error::缺少 APPLE_CERTIFICATE secret，无法对 iOS 真机签名"
+            exit 1
+          fi
+          KEYCHAIN="$RUNNER_TEMP/ios-build.keychain-db"
+          security create-keychain -p "" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "" "$KEYCHAIN"
+          echo -n "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          security set-key-partition-list -S utool: -s "$KEYCHAIN"
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          if [ -n "$APPLE_PROVISIONING_PROFILE" ]; then
+            echo -n "$APPLE_PROVISIONING_PROFILE" | base64 --decode > "$HOME/Library/MobileDevice/Provisioning Profiles/embedded.mobileprovision"
+          fi
+
       - uses: tauri-apps/tauri-action@action-v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IOS_MIN_VERSION: '14.0'
+          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
         with:
           projectPath: ./src-tauri
           mobile: ios
-          args: --target aarch64-sim
+          args: --target aarch64
           uploadWorkflowArtifacts: true
           workflowArtifactNamePattern: '[platform]-[arch]-[bundle]'
           retryAttempts: 2

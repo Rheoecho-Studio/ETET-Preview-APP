@@ -125,8 +125,8 @@ fn main() {
     );
 
     // ---- backend selection ----
-    // Windows and Linux desktop must run on the GPU (Vulkan); CPU-only is only
-    // used where no GPU backend is guaranteed to exist (Android, iOS simulator).
+    // Desktop (Windows/Linux) and Android run on the GPU via Vulkan.
+    // CPU-only is kept only for the iOS simulator, which has no Metal.
     let backend = env::var("LLAMA_GPU_BACKEND").unwrap_or_else(|_| {
         if is_ios {
             if is_ios_sim {
@@ -137,7 +137,7 @@ fn main() {
         } else if is_macos {
             "metal".to_string()
         } else if is_android {
-            "cpu".to_string()
+            "vulkan".to_string()
         } else {
             "vulkan".to_string() // Windows + Linux desktop
         }
