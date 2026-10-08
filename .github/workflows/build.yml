@@ -400,7 +400,7 @@ jobs:
         run: pnpm tauri ios init
 
       # 把 Apple 开发者证书 + provisioning profile 导入本机钥匙串，供 Xcode 自动签名。
-      # 需要在仓库 Settings -> Secrets and variables -> Actions 里配置：
+      # 需要在仓库 Settings -> Secrets and variables -> Actions 里配置 4 个 secret：
       #   APPLE_CERTIFICATE           p12 证书（base64 编码）
       #   APPLE_CERTIFICATE_PASSWORD  p12 导出密码
       #   APPLE_PROVISIONING_PROFILE  .mobileprovision（base64 编码；Ad Hoc / Development 才能直接装）
@@ -410,9 +410,19 @@ jobs:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_PROVISIONING_PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          if [ -z "$APPLE_CERTIFICATE" ]; then
-            echo "::error::缺少 APPLE_CERTIFICATE secret，无法对 iOS 真机签名"
+          if [ -z "$APPLE_CERTIFICATE" ] || [ -z "$APPLE_TEAM_ID" ]; then
+            cat <<'MSG'
+          ::error::iOS 真机 .ipa 必须经过 Apple 开发者签名，但仓库还没配置签名 Secrets。
+          到 仓库 Settings -> Secrets and variables -> Actions -> New repository secret 添加这 4 个：
+            APPLE_CERTIFICATE          开发者证书 Certificates.p12 的 base64：  base64 -i Certificates.p12
+            APPLE_CERTIFICATE_PASSWORD p12 的导出密码（导出时你设的）
+            APPLE_PROVISIONING_PROFILE App.mobileprovision 的 base64：        base64 -i App.mobileprovision
+                                      （必须是 Ad Hoc 或 Development 类型，才能直接装到设备）
+            APPLE_TEAM_ID              10 位团队 ID（Apple Developer 后台）
+          配齐后重跑本 job 即可自动签名并产出可安装的 .ipa。
+          MSG
             exit 1
           fi
           KEYCHAIN="$RUNNER_TEMP/ios-build.keychain-db"
