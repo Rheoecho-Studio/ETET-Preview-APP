@@ -328,14 +328,25 @@ jobs:
           curl -sSL --retry 3 --fail --max-time 300 \
             "https://codeload.github.com/KhronosGroup/Vulkan-Hpp/tar.gz/refs/tags/$VULKAN_SNAPSHOT" \
             | sudo tar -xz -C /opt/vulkanhpp --wildcards --strip-components=1 '*/vulkan'
-          sudo chmod -R a+rX /opt/vkh /opt/vulkanhpp
+          # ggml-vulkan-types.h also includes <spirv/unified1/spirv.hpp> (SPIRV-Headers).
+          # The distro package puts it in /usr/include, but cross-compiling with --sysroot
+          # hides /usr/include, so stage it the same way. Same SDK tag as above so the
+          # Vulkan / SPIR-V headers stay in sync.
+          sudo mkdir -p /opt/spirvh
+          curl -sSL --retry 3 --fail --max-time 300 \
+            "https://codeload.github.com/KhronosGroup/SPIRV-Headers/tar.gz/refs/tags/vulkan-sdk-$VULKAN_SNAPSHOT.0" \
+            | sudo tar -xz -C /opt/spirvh --wildcards --strip-components=2 '*/include/*'
+
+          sudo chmod -R a+rX /opt/vkh /opt/vulkanhpp /opt/spirvh
           ls /opt/vkh/vulkan/vulkan.h \
              /opt/vkh/vk_video/vulkan_video_codec_av1std.h \
              /opt/vulkanhpp/vulkan/vulkan.hpp \
-             /opt/vulkanhpp/vulkan/vulkan_hpp_macros.hpp
+             /opt/vulkanhpp/vulkan/vulkan_hpp_macros.hpp \
+             /opt/spirvh/spirv/unified1/spirv.hpp
           grep -m1 'define VK_HEADER_VERSION' /opt/vkh/vulkan/vulkan_core.h
           echo "VULKAN_HEADERS_INCLUDE=/opt/vkh" >> $GITHUB_ENV
           echo "VULKAN_HPP_INCLUDE=/opt/vulkanhpp" >> $GITHUB_ENV
+          echo "SPIRV_HEADERS_INCLUDE=/opt/spirvh" >> $GITHUB_ENV
 
       # tauri-action does NOT create the Android Studio project, and it is not
       # committed either -> `tauri android build` aborted with

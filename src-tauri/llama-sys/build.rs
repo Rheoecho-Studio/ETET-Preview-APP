@@ -147,6 +147,12 @@ fn main() {
     println!("cargo:rerun-if-env-changed=IOS_MIN_VERSION");
     println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
     println!("cargo:rerun-if-env-changed=ANDROID_NDK_HOME");
+    println!("cargo:rerun-if-env-changed=VULKAN_SDK");
+    println!("cargo:rerun-if-env-changed=VULKAN_HEADERS_INCLUDE");
+    println!("cargo:rerun-if-env-changed=VULKAN_HPP_INCLUDE");
+    println!("cargo:rerun-if-env-changed=SPIRV_HEADERS_INCLUDE");
+    println!("cargo:rerun-if-env-changed=SPIRV_HEADERS_DIR");
+    println!("cargo:rerun-if-env-changed=LLAMA_CMAKE_DIR");
     println!(
         "cargo:rerun-if-changed={}",
         llama_dir.join("include/llama.h").display()
@@ -281,6 +287,14 @@ fn main() {
             cfg.cxxflag(format!("-I{dir}"));
         }
         if let Some(dir) = first_env(&["VULKAN_HPP_INCLUDE"]) {
+            cfg.cxxflag(format!("-I{dir}"));
+        }
+        // ggml-vulkan-types.h also includes <spirv/unified1/spirv.hpp>, guarded by
+        // __has_include with a plain #include as the fallback branch. The distro package has
+        // it under /usr/include, but --sysroot hides /usr/include when cross-compiling, so
+        // CI stages SPIRV-Headers too and exports SPIRV_HEADERS_INCLUDE.
+        if let Some(dir) = first_env(&["SPIRV_HEADERS_INCLUDE"]) {
+            cfg.cflag(format!("-I{dir}"));
             cfg.cxxflag(format!("-I{dir}"));
         }
         // ggml-vulkan calls `find_package(SPIRV-Headers CONFIG REQUIRED)`, but never actually
@@ -499,6 +513,16 @@ fn main() {
         // ggml-vulkan links the Vulkan loader dynamically at runtime.
         // Windows imports from vulkan-1.dll/.lib, everything else uses -lvulkan.
         if is_windows {
+            // The import library lives in the Vulkan SDK, which is not on rustc's default
+            // search path, so the final link dies with
+            //   "LINK : fatal error LNK1181: cannot open input file 'vulkan-1.lib'".
+            // The SDK layout is <sdk>/Lib/vulkan-1.lib; the lowercase variant is added too so
+            // a differently laid-out SDK still resolves (a missing -L directory is harmless).
+            if let Some(sdk) = first_env(&["VULKAN_SDK"]) {
+                let sdk = strip_verbatim(PathBuf::from(sdk));
+                println!("cargo:rustc-link-search=native={}", sdk.join("Lib").display());
+                println!("cargo:rustc-link-search=native={}", sdk.join("lib").display());
+            }
             println!("cargo:rustc-link-lib=vulkan-1");
         } else {
             println!("cargo:rustc-link-lib=dylib=vulkan");
