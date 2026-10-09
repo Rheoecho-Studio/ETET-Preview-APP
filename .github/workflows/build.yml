@@ -365,10 +365,16 @@ jobs:
             sed -i -E 's/([A-Za-z]*minSdk[A-Za-z]*[ =]+)[0-9]+/\1 30/; s/([A-Za-z]*targetSdk[A-Za-z]*[ =]+)[0-9]+/\1 37/; s/([A-Za-z]*compileSdk[A-Za-z]*[ =]+)[0-9]+/\1 37/' "$f"
           fi
 
-      # `tauri android build` emits BOTH a signed APK and an .aab, and
-      # uploadWorkflowArtifacts would ship both. Only the signed APK is wanted,
-      # so automatic artifact upload is OFF and the APK is uploaded manually
-      # below (the .aab gradle produces is simply left on the runner).
+      # `tauri android build` emits an APK *and* an .aab, and
+      # uploadWorkflowArtifacts would ship both. Only the APK is wanted, so
+      # automatic artifact upload is OFF: the APK is signed and uploaded
+      # manually below, and the .aab is left on the runner.
+      #
+      # IMPORTANT: the generated gradle project has NO signing config, so gradle
+      # only ever produces `app-universal-release-unsigned.apk`. The sibling
+      # `app-universal-release.apk` is listed by tauri as a *candidate* but is
+      # never actually created - pointing an upload step at it fails with
+      # "No files were found with the provided path". Signing happens below.
       #
       # DO NOT invoke gradle directly (e.g. `./gradlew bundleRelease`) to build
       # an AAB here: gradle's rust plugin then re-runs `pnpm tauri android ...`
@@ -389,14 +395,81 @@ jobs:
           uploadWorkflowArtifacts: false
           retryAttempts: 2
 
-      # Upload ONLY the signed release APK. Gradle leaves both an
-      # `app-universal-release-unsigned.apk` intermediate and the signed
-      # `app-universal-release.apk`; upload the signed one (no -unsigned suffix).
+      # Sign the release APK.
+      # Preferred: a FIXED keystore supplied through repo secrets
+      #   ANDROID_KEYSTORE_BASE64   (base64 of the .jks, single line)
+      #   ANDROID_KEYSTORE_PASSWORD (store + key password)
+      #   ANDROID_KEY_ALIAS         (default: etet)
+      # A fixed key means every release shares one signature, so users can
+      # upgrade in place instead of uninstalling first.
+      # Fallback: generate a throwaway self-signed key on the runner, so the job
+      # still works before the secrets are configured. A warning is logged --
+      # each run then produces a DIFFERENT signature.
+      # zipalign MUST run before apksigner or the v2/v3 signature is invalid.
+      - name: sign Android APK
+        shell: bash
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          APK_IN=src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk
+          if [ ! -f "$APK_IN" ]; then
+            echo "::error::unsigned APK not found at $APK_IN"
+            find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' || true
+            exit 1
+          fi
+
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "sdk=$SDK"
+          # `|| true` so a missing build-tools dir falls through to the
+          # diagnostic branch below instead of aborting under `set -e -o pipefail`
+          BT=$(ls -1d "$SDK"/build-tools/*/ 2>/dev/null | sed 's:/$::' | sort -V | tail -1 || true)
+          if [ -z "$BT" ] || [ ! -x "$BT/apksigner" ]; then
+            echo "::error::apksigner not found under $SDK/build-tools"
+            ls -1 "$SDK" 2>/dev/null || true
+            ls -1 "$SDK/build-tools" 2>/dev/null || true
+            exit 1
+          fi
+          echo "build-tools: $BT"
+
+          KS="$RUNNER_TEMP/signing.jks"
+          rm -f "$KS"
+          if [ -n "${KS_B64:-}" ] && [ -n "${KS_PASS:-}" ]; then
+            echo "$KS_B64" | base64 -d > "$KS"
+            KPASS="$KS_PASS"
+            ALIAS="${KS_ALIAS:-etet}"
+            echo "signing with the fixed keystore from repo secrets (alias=$ALIAS)"
+          else
+            echo "::warning::ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD not set - generating a throwaway key. Each run gets a DIFFERENT signature and users cannot upgrade in place."
+            KPASS="android"
+            ALIAS="etet"
+            keytool -genkeypair -v \
+              -keystore "$KS" -storetype JKS -alias "$ALIAS" \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$KPASS" -keypass "$KPASS" \
+              -dname "CN=ETET-Preview, OU=RheoEcho, O=RheoEcho, L=Unknown, S=Unknown, C=CN"
+          fi
+
+          ALIGNED="$RUNNER_TEMP/app-universal-release-aligned.apk"
+          OUT="$RUNNER_TEMP/app-universal-release.apk"
+          "$BT/zipalign" -f -p 4 "$APK_IN" "$ALIGNED"
+          "$BT/apksigner" sign \
+            --ks "$KS" --ks-key-alias "$ALIAS" \
+            --ks-pass "pass:$KPASS" --key-pass "pass:$KPASS" \
+            --out "$OUT" "$ALIGNED"
+          # fail loudly if the result is not a properly signed APK
+          "$BT/apksigner" verify --print-certs "$OUT"
+          echo "apk=$OUT" >> "$GITHUB_ENV"
+          echo "signed apk: $OUT ($(du -h "$OUT" | cut -f1))"
+
+      # Upload ONLY the signed APK (no AAB).
       - name: upload signed Android APK
         uses: actions/upload-artifact@v4
         with:
           name: android-universal-apk
-          path: src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
+          path: ${{ env.apk }}
           if-no-files-found: error
 
   # ios
