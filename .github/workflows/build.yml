@@ -26,7 +26,6 @@ name: Build ETET-Preview
 on:
   push:
     branches: [main]
-    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -232,14 +231,15 @@ jobs:
         with:
           projectPath: ./src-tauri
           args: ${{ matrix.args }}
+          # Build + upload the bundle as a workflow artifact only. The actual
+          # GitHub Release (all 5 platforms, incl. the unsigned iOS IPA) is
+          # published by the dedicated `release` job below, so tauri-action must
+          # NOT create its own release here (otherwise the desktop and android
+          # jobs race on the same tag). On a tag push the release is created on
+          # the user's own tag (github.ref_name), not a tauri-generated one.
           uploadWorkflowArtifacts: true
           workflowArtifactNamePattern: '[platform]-[arch]-[bundle]'
           retryAttempts: 2
-          tagName: ${{ startsWith(github.ref, 'refs/tags/') && 'ETET-Preview-v__VERSION__' || '' }}
-          releaseName: 'ETET-Preview v__VERSION__'
-          releaseBody: 'Windows (msi), macOS (dmg, Apple Silicon) and Linux (AppImage) builds.'
-          releaseDraft: true
-          prerelease: false
 
   # android
   android:
@@ -377,11 +377,6 @@ jobs:
           uploadWorkflowArtifacts: true
           workflowArtifactNamePattern: '[platform]-[arch]-[bundle]'
           retryAttempts: 2
-          tagName: ${{ startsWith(github.ref, 'refs/tags/') && 'ETET-Preview-v__VERSION__' || '' }}
-          releaseName: 'ETET-Preview v__VERSION__'
-          releaseBody: 'ETET-Preview v__VERSION__ build artifacts.'
-          releaseDraft: true
-          prerelease: false
 
   # ios
   ios:
@@ -473,18 +468,16 @@ jobs:
           # device arch (not -sim; simulator binaries cannot run on a device).
           # Signing is already off via the patched Xcode project above.
           args: --target aarch64
-          # We package the unsigned IPA ourselves, so disable tauri-action's upload
+          # We package the unsigned IPA ourselves and upload it as a workflow
+          # artifact (ios-aarch64-device-ipa); the dedicated `release` job then
+          # attaches it to the GitHub Release on the user's tag.
           uploadWorkflowArtifacts: false
           workflowArtifactNamePattern: '[platform]-[arch]-[bundle]'
           retryAttempts: 2
-          tagName: ${{ startsWith(github.ref, 'refs/tags/') && 'ETET-Preview-v__VERSION__' || '' }}
-          releaseName: 'ETET-Preview v__VERSION__'
-          releaseBody: 'ETET-Preview v__VERSION__ build artifacts.'
-          releaseDraft: true
-          prerelease: false
 
-      # Manually package the unsigned device .app into an unsigned .ipa (a zip of Payload/<app>.app).
-      # Users download it and self-sign with their own Apple ID to install on a device.
+      # Manually package the unsigned device .app into an unsigned .ipa (a zip of
+      # Payload/<app>.app). Users download it and self-sign with their own Apple ID
+      # (e.g. 爱思/AltStore) to install on a device — no dev account needed.
       - name: package unsigned device IPA
         if: always()
         shell: bash
@@ -512,3 +505,59 @@ jobs:
         with:
           name: ios-aarch64-device-ipa
           path: ${{ runner.temp }}/ios-unsigned.ipa
+
+  # After every platform is green on a push to main, derive the version from
+  # tauri.conf.json and push an ANNOTATED `vX.Y.Z` tag whose message carries the
+  # notes below (title = the version, body = the notes). No GitHub Release is
+  # created — the build artifacts stay as each job's workflow artifacts. Runs
+  # only on push; `on.push` no longer matches tags, so the pushed tag does not
+  # re-trigger a build.
+  tag:
+    name: push version tag
+    needs: [desktop, android, ios]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: read version from tauri.conf.json
+        id: ver
+        shell: bash
+        run: |
+          V=$(python3 -c "import json; print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "tag=v$V" >> "$GITHUB_OUTPUT"
+          echo "version: $V  tag: v$V"
+
+      - name: build tag message
+        shell: bash
+        run: |
+          # First line of the commit that triggered this run.
+          MSG=$(git log -1 --pretty=%B | head -1)
+          {
+            echo "# ETET–Preview–APP"
+            echo " This application currently does not have the production capacity."
+            echo "> $MSG"
+            echo "RheoEcho 2026"
+          } > "$RUNNER_TEMP/tag-message.txt"
+          echo "---- tag message ----"
+          cat "$RUNNER_TEMP/tag-message.txt"
+
+      - name: push annotated version tag
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          TAG="${{ steps.ver.outputs.tag }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "tag $TAG already exists, skipping push"
+          else
+            git tag -a "$TAG" -F "$RUNNER_TEMP/tag-message.txt"
+            git push origin "$TAG"
+            echo "pushed annotated tag $TAG"
+          fi
