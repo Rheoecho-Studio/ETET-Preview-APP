@@ -365,6 +365,16 @@ jobs:
             sed -i -E 's/([A-Za-z]*minSdk[A-Za-z]*[ =]+)[0-9]+/\1 30/; s/([A-Za-z]*targetSdk[A-Za-z]*[ =]+)[0-9]+/\1 37/; s/([A-Za-z]*compileSdk[A-Za-z]*[ =]+)[0-9]+/\1 37/' "$f"
           fi
 
+      # `tauri android build` emits BOTH a signed APK and an .aab, and
+      # uploadWorkflowArtifacts would ship both. Only the signed APK is wanted,
+      # so automatic artifact upload is OFF and the APK is uploaded manually
+      # below (the .aab gradle produces is simply left on the runner).
+      #
+      # DO NOT invoke gradle directly (e.g. `./gradlew bundleRelease`) to build
+      # an AAB here: gradle's rust plugin then re-runs `pnpm tauri android ...`
+      # outside tauri's own invocation and the build dies with
+      #   Execution failed for task ':app:rustBuildArm64Release'
+      #   > Process 'command 'pnpm'' finished with non-zero exit value 1
       - uses: tauri-apps/tauri-action@action-v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -374,36 +384,20 @@ jobs:
           projectPath: ./src-tauri
           mobile: android
           args: --target aarch64
-          uploadWorkflowArtifacts: true
-          workflowArtifactNamePattern: '[platform]-[arch]-[bundle]'
+          # signed APK is uploaded manually below; keeps the .aab out of the
+          # artifacts (and therefore out of the GitHub Release).
+          uploadWorkflowArtifacts: false
           retryAttempts: 2
 
-      # Also emit an Android App Bundle (.aab) for Google Play. The native
-      # libraries were already compiled by the APK build above, so gradle
-      # packages incrementally from its cache; the same self-signed debug
-      # keystore used for the APK signs the AAB (no extra secrets needed).
-      - name: build Android AAB
-        env:
-          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
-          ANDROID_PLATFORM: android-30
-        shell: bash
-        run: |
-          cd src-tauri/gen/android
-          chmod +x gradlew
-          ./gradlew bundleRelease -x lint
-          AAB=$(find app/build/outputs/bundle -name '*.aab' | head -n1)
-          if [ -z "$AAB" ]; then
-            echo "::error::no .aab produced by bundleRelease"
-            exit 1
-          fi
-          echo "aab=$AAB" >> "$GITHUB_ENV"
-          echo "built $AAB ($(du -h "$AAB" | cut -f1))"
-
-      - name: upload Android AAB
+      # Upload ONLY the signed release APK. Gradle leaves both an
+      # `app-universal-release-unsigned.apk` intermediate and the signed
+      # `app-universal-release.apk`; upload the signed one (no -unsigned suffix).
+      - name: upload signed Android APK
         uses: actions/upload-artifact@v4
         with:
-          name: android-aarch64-aab
-          path: ${{ env.aab }}
+          name: android-universal-apk
+          path: src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
+          if-no-files-found: error
 
   # ios
   ios:
