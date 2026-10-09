@@ -99,19 +99,6 @@ fn copy_file_to_cache(
     Ok(target)
 }
 
-#[cfg(target_os = "android")]
-fn jni_check<T>(
-    env: &mut jni::JNIEnv,
-    r: jni::errors::Result<T>,
-    what: &str,
-) -> Result<T, String> {
-    r.map_err(|e| {
-        // clear any pending Java exception so later JNI calls don't crash
-        let _ = env.exception_clear();
-        format!("{what}: {e}")
-    })
-}
-
 /// Copy a `content://` URI's bytes into the app cache dir and return the
 /// real path. Runs entirely in Rust via JNI: the ContentResolver gives us a
 /// ParcelFileDescriptor, whose fd we detach and copy with std::io.
@@ -138,50 +125,50 @@ fn resolve_android_content_uri(app: &tauri::AppHandle, uri: &str) -> Result<Path
     let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
     let context = unsafe { JObject::from_raw(ctx.context() as sys::jobject) };
 
-    let juri_str = jni_check(&mut env, env.new_string(uri), "new_string(uri)")?;
+    // NOTE: every JNI call below is a self-contained statement closed with
+    // map_err. A shared `jni_check(&mut env, env.foo(..), ..)` helper cannot
+    // be used here: it takes two mutable borrows of `env` in one expression,
+    // which the borrow checker rejects (E0499 / E0502).
+    let juri_str = env.new_string(uri).map_err(|e| e.to_string())?;
     let juri_obj: JObject = juri_str.into();
-    let juri = jni_check(
-        &mut env,
-        env.call_static_method(
+    let juri = env
+        .call_static_method(
             "android/net/Uri",
             "parse",
             "(Ljava/lang/String;)Landroid/net/Uri;",
             &[JValue::Object(&juri_obj)],
-        ),
-        "Uri.parse",
-    )?
-    .l()
-    .map_err(|e| e.to_string())?;
+        )
+        .map_err(|e| e.to_string())?
+        .l()
+        .map_err(|e| e.to_string())?;
 
-    let resolver = jni_check(
-        &mut env,
-        env.call_method(
+    let resolver = env
+        .call_method(
             &context,
             "getContentResolver",
             "()Landroid/content/ContentResolver;",
             &[],
-        ),
-        "getContentResolver",
-    )?
-    .l()
-    .map_err(|e| e.to_string())?;
+        )
+        .map_err(|e| e.to_string())?
+        .l()
+        .map_err(|e| e.to_string())?;
 
     let jmode: JObject = env.new_string("r").map_err(|e| e.to_string())?.into();
-    let pfd = jni_check(
-        &mut env,
-        env.call_method(
+    let pfd = env
+        .call_method(
             &resolver,
             "openFileDescriptor",
             "(Landroid/net/Uri;Ljava/lang/String;)Landroid/os/ParcelFileDescriptor;",
             &[JValue::Object(&juri), JValue::Object(&jmode)],
-        ),
-        "openFileDescriptor",
-    )?
-    .l()
-    .map_err(|e| e.to_string())?;
+        )
+        .map_err(|e| e.to_string())?
+        .l()
+        .map_err(|e| e.to_string())?;
 
     // take ownership of the fd on the Rust side
-    let raw_fd = jni_check(&mut env, env.call_method(&pfd, "detachFd", "()I", &[]), "detachFd")?
+    let raw_fd = env
+        .call_method(&pfd, "detachFd", "()I", &[])
+        .map_err(|e| e.to_string())?
         .i()
         .map_err(|e| e.to_string())?;
     if raw_fd < 0 {
