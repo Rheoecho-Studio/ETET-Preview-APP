@@ -378,6 +378,33 @@ jobs:
           workflowArtifactNamePattern: '[platform]-[arch]-[bundle]'
           retryAttempts: 2
 
+      # Also emit an Android App Bundle (.aab) for Google Play. The native
+      # libraries were already compiled by the APK build above, so gradle
+      # packages incrementally from its cache; the same self-signed debug
+      # keystore used for the APK signs the AAB (no extra secrets needed).
+      - name: build Android AAB
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          ANDROID_PLATFORM: android-30
+        shell: bash
+        run: |
+          cd src-tauri/gen/android
+          chmod +x gradlew
+          ./gradlew bundleRelease -x lint
+          AAB=$(find app/build/outputs/bundle -name '*.aab' | head -n1)
+          if [ -z "$AAB" ]; then
+            echo "::error::no .aab produced by bundleRelease"
+            exit 1
+          fi
+          echo "aab=$AAB" >> "$GITHUB_ENV"
+          echo "built $AAB ($(du -h "$AAB" | cut -f1))"
+
+      - name: upload Android AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-aarch64-aab
+          path: ${{ env.aab }}
+
   # ios
   ios:
     permissions:

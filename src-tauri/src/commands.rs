@@ -7,9 +7,251 @@ use std::path::PathBuf;
 
 use llama_sys::*;
 use serde::{Deserialize, Serialize};
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 use crate::engine::{self, ChatMsg};
+
+// ============================================================
+// Path normalization.
+//
+// The webview hands us the path string returned by Tauri's file dialog.
+// That string is NOT always a plain filesystem path:
+//
+//   - Android (Storage Access Framework) returns `content://` URIs. These
+//     are not openable by llama.cpp's fopen/stat, so we resolve them via
+//     JNI into the app cache dir (see resolve_android_content_uri).
+//   - iOS returns a `file://` URL pointing into the app sandbox — usually
+//     tmp/Inbox, which the OS is free to purge. We strip the scheme, decode
+//     percent escapes, and (on mobile) copy the file into the persistent
+//     cache so a later load cannot lose it to tmp cleanup.
+//   - Desktop (Windows/macOS/Linux) dialogs return plain paths, passed
+//     through unchanged. A stray `file://` is still handled uniformly.
+//
+// No runtime permission is required: Android relies on the picker's read
+// grant, and on iOS the file is already inside the app sandbox.
+// ============================================================
+
+/// Normalize any path-ish input we get from the webview.
+pub fn normalize_path(app: &tauri::AppHandle, input: &str) -> Result<String, String> {
+    // Android SAF returns content:// URIs that are not openable as paths.
+    #[cfg(target_os = "android")]
+    {
+        if input.starts_with("content://") {
+            return resolve_android_content_uri(app, input)
+                .map(|p| p.to_string_lossy().into_owned());
+        }
+    }
+
+    // file:// URLs: strip the scheme + decode, then on mobile copy into the
+    // persistent cache so a later load cannot lose the file to tmp cleanup.
+    if let Some(rest) = input.strip_prefix("file://") {
+        let fs_path = percent_decode(rest);
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        {
+            let p = std::path::Path::new(&fs_path);
+            if p.is_file() {
+                if let Ok(cached) = copy_file_to_cache(app, p) {
+                    return Ok(cached.to_string_lossy().into_owned());
+                }
+            }
+        }
+        return Ok(fs_path);
+    }
+
+    Ok(input.to_string())
+}
+
+/// Copy a real file path into the app cache dir (mobile only) and return it.
+/// Models are multi-GB, so reuse the existing copy when the size matches.
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn copy_file_to_cache(
+    app: &tauri::AppHandle,
+    src: &std::path::Path,
+) -> Result<PathBuf, String> {
+    use std::io::Write;
+
+    let cache_dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("app cache dir: {e}"))?;
+    let target_dir = cache_dir.join("etet_models");
+    std::fs::create_dir_all(&target_dir).map_err(|e| e.to_string())?;
+
+    let name = sanitize_name(
+        &src
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "model.gguf".to_string()),
+    );
+    let target = target_dir.join(&name);
+
+    let src_len = src.metadata().map(|m| m.len()).unwrap_or(0);
+    let cached_len = std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0);
+    if src_len > 0 && src_len == cached_len {
+        return Ok(target);
+    }
+
+    let mut src_file = std::fs::File::open(src).map_err(|e| e.to_string())?;
+    let out = std::fs::File::create(&target).map_err(|e| e.to_string())?;
+    let mut writer = std::io::BufWriter::with_capacity(1024 * 1024, out);
+    std::io::copy(&mut src_file, &mut writer).map_err(|e| format!("copy model: {e}"))?;
+    writer.flush().ok();
+    Ok(target)
+}
+
+#[cfg(target_os = "android")]
+fn jni_check<T>(
+    env: &mut jni::JNIEnv,
+    r: jni::errors::Result<T>,
+    what: &str,
+) -> Result<T, String> {
+    r.map_err(|e| {
+        // clear any pending Java exception so later JNI calls don't crash
+        let _ = env.exception_clear();
+        format!("{what}: {e}")
+    })
+}
+
+/// Copy a `content://` URI's bytes into the app cache dir and return the
+/// real path. Runs entirely in Rust via JNI: the ContentResolver gives us a
+/// ParcelFileDescriptor, whose fd we detach and copy with std::io.
+///
+/// No storage permission is needed: the document picker's read grant is
+/// enough. The copy happens once per file (size-checked cache reuse).
+#[cfg(target_os = "android")]
+fn resolve_android_content_uri(app: &tauri::AppHandle, uri: &str) -> Result<PathBuf, String> {
+    use jni::objects::{JObject, JValue};
+    use jni::sys;
+    use jni::JavaVM;
+    use std::io::Write;
+    use std::os::unix::io::FromRawFd;
+
+    let cache_dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("app cache dir: {e}"))?;
+    let target_dir = cache_dir.join("etet_models");
+    std::fs::create_dir_all(&target_dir).map_err(|e| e.to_string())?;
+
+    let ctx = ndk_context::android_context();
+    let vm = unsafe { JavaVM::from_raw(ctx.vm() as *mut sys::JavaVM) }.map_err(|e| e.to_string())?;
+    let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
+    let context = unsafe { JObject::from_raw(ctx.context() as sys::jobject) };
+
+    let juri_str = jni_check(&mut env, env.new_string(uri), "new_string(uri)")?;
+    let juri_obj: JObject = juri_str.into();
+    let juri = jni_check(
+        &mut env,
+        env.call_static_method(
+            "android/net/Uri",
+            "parse",
+            "(Ljava/lang/String;)Landroid/net/Uri;",
+            &[JValue::Object(&juri_obj)],
+        ),
+        "Uri.parse",
+    )?
+    .l()
+    .map_err(|e| e.to_string())?;
+
+    let resolver = jni_check(
+        &mut env,
+        env.call_method(
+            &context,
+            "getContentResolver",
+            "()Landroid/content/ContentResolver;",
+            &[],
+        ),
+        "getContentResolver",
+    )?
+    .l()
+    .map_err(|e| e.to_string())?;
+
+    let jmode: JObject = env.new_string("r").map_err(|e| e.to_string())?.into();
+    let pfd = jni_check(
+        &mut env,
+        env.call_method(
+            &resolver,
+            "openFileDescriptor",
+            "(Landroid/net/Uri;Ljava/lang/String;)Landroid/os/ParcelFileDescriptor;",
+            &[JValue::Object(&juri), JValue::Object(&jmode)],
+        ),
+        "openFileDescriptor",
+    )?
+    .l()
+    .map_err(|e| e.to_string())?;
+
+    // take ownership of the fd on the Rust side
+    let raw_fd = jni_check(&mut env, env.call_method(&pfd, "detachFd", "()I", &[]), "detachFd")?
+        .i()
+        .map_err(|e| e.to_string())?;
+    if raw_fd < 0 {
+        return Err(format!("detachFd returned {raw_fd}"));
+    }
+    let mut file = unsafe { std::fs::File::from_raw_fd(raw_fd) };
+
+    let name = sanitize_name(&content_uri_file_name(uri));
+    let target = target_dir.join(&name);
+
+    // reuse the cached copy when the size matches (models are multi-GB)
+    let src_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let cached_len = std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0);
+    if src_len > 0 && src_len == cached_len {
+        return Ok(target);
+    }
+
+    let out =
+        std::fs::File::create(&target).map_err(|e| format!("create {}: {e}", target.display()))?;
+    let mut writer = std::io::BufWriter::with_capacity(1024 * 1024, out);
+    std::io::copy(&mut file, &mut writer).map_err(|e| format!("copy model: {e}"))?;
+    writer.flush().ok();
+    Ok(target)
+}
+
+/// Decode %XX escapes so a URI's tail becomes a usable file name.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(v) = u8::from_str_radix(
+                std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""),
+                16,
+            ) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// ".../document/primary%3ALLM%2FETET-x.gguf" -> "ETET-x.gguf"
+fn content_uri_file_name(uri: &str) -> String {
+    let tail = uri.rsplit('/').next().unwrap_or("");
+    let decoded = percent_decode(tail);
+    decoded
+        .rsplit(|c| c == '/' || c == ':')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("model.gguf")
+        .to_string()
+}
+
+fn sanitize_name(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
 
 #[derive(Serialize)]
 pub struct ModelInfo {
@@ -33,7 +275,8 @@ pub struct MmprojInfo {
 /// Parse GGUF metadata without loading the model into memory, and scan the
 /// same directory for mmproj files.
 #[tauri::command]
-pub fn pick_model(path: String) -> Result<ModelInfo, String> {
+pub fn pick_model(app: tauri::AppHandle, path: String) -> Result<ModelInfo, String> {
+    let path = normalize_path(&app, &path)?;
     let meta = PathBuf::from(&path);
     if !meta.is_file() {
         return Err(format!("not a file: {path}"));
@@ -129,6 +372,13 @@ pub async fn load_model(
     options: LoadOptions,
 ) -> Result<engine::LoadResult, String> {
     use tauri::Emitter;
+    // Resolve content:// (Android) before the paths cross into the blocking
+    // task, so the JNI calls happen on this (already attached) thread.
+    let model_path = normalize_path(&app, &options.model_path)?;
+    let mmproj_path = match &options.mmproj_path {
+        Some(p) => Some(normalize_path(&app, p)?),
+        None => None,
+    };
     // long blocking load must stay off the main thread or the UI freezes
     let app2 = app.clone();
     let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -150,8 +400,8 @@ pub async fn load_model(
     let result = tauri::async_runtime::spawn_blocking(move || {
         let r = engine::load(
             engine::LoadParams {
-                model_path: options.model_path,
-                mmproj_path: options.mmproj_path,
+                model_path,
+                mmproj_path,
                 n_ctx: options.n_ctx,
                 n_gpu_layers: options.n_gpu_layers,
                 flash_attn: options.flash_attn,
@@ -219,7 +469,8 @@ pub fn stop_generation() {
 
 /// Read a text file (Rust-side I/O + truncation to protect small contexts).
 #[tauri::command]
-pub fn read_file_text(path: String) -> Result<String, String> {
+pub fn read_file_text(app: tauri::AppHandle, path: String) -> Result<String, String> {
+    let path = normalize_path(&app, &path)?;
     let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let mut content = content;
     if content.chars().count() > 20_000 {
@@ -237,7 +488,8 @@ pub struct ImageData {
 
 /// Read an image file and return base64 (Rust-side I/O only).
 #[tauri::command]
-pub fn read_file_base64(path: String) -> Result<ImageData, String> {
+pub fn read_file_base64(app: tauri::AppHandle, path: String) -> Result<ImageData, String> {
+    let path = normalize_path(&app, &path)?;
     let p = PathBuf::from(&path);
     let bytes = std::fs::read(&p).map_err(|e| e.to_string())?;
     use base64::Engine;

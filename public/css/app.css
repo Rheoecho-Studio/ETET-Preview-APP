@@ -3,6 +3,12 @@
  * Extends the rheoecho design language (dark #1a1a1a,
  * neon #16ff98, Unifont titles, Oppo Sans body).
  * Responsive: mobile-first base + desktop enhancements >=1024px.
+ *
+ * env(safe-area-inset-*) keeps content clear of the Android status
+ * bar / iOS notch and the home indicator. They resolve to 0 on
+ * desktop windows, so these rules are harmless there. The mobile
+ * edge-to-edge behavior is enabled by tauri-plugin-edge-to-edge
+ * (registered in src-tauri/src/lib.rs).
  * ============================================================ */
 
 [hidden] { display: none !important; }
@@ -14,7 +20,9 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    padding: 1.5rem 1rem calc(2.5rem + env(safe-area-inset-bottom));
+    /* top padding clears the status bar / notch; max() guards the
+       first-paint case where the inset isn't set yet */
+    padding: max(1.5rem, env(safe-area-inset-top)) 1rem calc(2.5rem + env(safe-area-inset-bottom)) 1rem;
     gap: 1.2rem;
 }
 
@@ -22,7 +30,7 @@
     justify-content: flex-start;
     height: 100vh;
     height: 100dvh;
-    padding: 0.8rem 0 calc(0.5rem + env(safe-area-inset-bottom));
+    padding: max(0.8rem, env(safe-area-inset-top)) 0 calc(0.5rem + env(safe-area-inset-bottom));
     overflow: hidden;
 }
 
@@ -36,7 +44,7 @@
 #screen-model { position: relative; }
 #lang-switch {
     position: absolute;
-    top: 1rem;
+    top: calc(1rem + env(safe-area-inset-top));
     right: 1rem;
     display: flex;
     gap: 0.3rem;
