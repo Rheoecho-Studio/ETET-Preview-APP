@@ -507,13 +507,14 @@ jobs:
           path: ${{ runner.temp }}/ios-unsigned.ipa
 
   # After every platform is green on a push to main, derive the version from
-  # tauri.conf.json and push an ANNOTATED `vX.Y.Z` tag whose message carries the
-  # notes below (title = the version, body = the notes). No GitHub Release is
-  # created — the build artifacts stay as each job's workflow artifacts. Runs
-  # only on push; `on.push` no longer matches tags, so the pushed tag does not
-  # re-trigger a build.
-  tag:
-    name: push version tag
+  # tauri.conf.json, push an ANNOTATED `vX.Y.Z` tag, and publish a GitHub
+  # Release at that tag (title = the version, body = the notes below) carrying
+  # all 5 bundles incl. the unsigned iOS IPA that users self-sign. A Release is
+  # required to attach binaries — a plain tag only ships the auto-generated
+  # source tarball. Runs only on push; `on.push` no longer matches tags, so the
+  # pushed tag does not re-trigger a build.
+  release:
+    name: publish release + tag
     needs: [desktop, android, ios]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
@@ -534,7 +535,17 @@ jobs:
           echo "tag=v$V" >> "$GITHUB_OUTPUT"
           echo "version: $V  tag: v$V"
 
-      - name: build tag message
+      - name: download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: list downloaded artifacts
+        run: find artifacts -type f -exec ls -lh {} \;
+
+      - name: build release notes
+        id: notes
         shell: bash
         run: |
           # First line of the commit that triggered this run.
@@ -542,11 +553,11 @@ jobs:
           {
             echo "# ETET–Preview–APP"
             echo " This application currently does not have the production capacity."
-            echo "> $MSG"
+            echo "> v${{ steps.ver.outputs.version }}: $MSG"
             echo "RheoEcho 2026"
-          } > "$RUNNER_TEMP/tag-message.txt"
-          echo "---- tag message ----"
-          cat "$RUNNER_TEMP/tag-message.txt"
+          } > "$RUNNER_TEMP/release-notes.md"
+          echo "---- release notes ----"
+          cat "$RUNNER_TEMP/release-notes.md"
 
       - name: push annotated version tag
         shell: bash
@@ -557,7 +568,20 @@ jobs:
           if git rev-parse "$TAG" >/dev/null 2>&1; then
             echo "tag $TAG already exists, skipping push"
           else
-            git tag -a "$TAG" -F "$RUNNER_TEMP/tag-message.txt"
+            git tag -a "$TAG" -F "$RUNNER_TEMP/release-notes.md"
             git push origin "$TAG"
             echo "pushed annotated tag $TAG"
           fi
+
+      - name: publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.tag }}
+          body_path: ${{ runner.temp }}/release-notes.md
+          files: artifacts/**
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
